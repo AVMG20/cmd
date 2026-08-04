@@ -1,0 +1,11 @@
+{
+  "model": "haiku",
+  "claude_path": "claude",
+  "max_pipe_chars": 4000,
+  "sample_read_bytes": 262144,
+  "enable_think": false,
+  "effort": "medium",
+  "timeout_seconds": 120,
+  "show_thinking": false,
+  "dangerous_patterns": []
+}

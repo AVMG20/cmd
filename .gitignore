@@ -1,0 +1,6 @@
+cmd
+cmd-ai
+*.exe
+*.test
+coverage.out
+.idea
