@@ -123,3 +123,40 @@ func TestCollectFilesDeduplicates(t *testing.T) {
 		t.Errorf("expected one entry for one file, got %d: %+v", len(files), files)
 	}
 }
+
+func TestStdinPathRejectsAPipe(t *testing.T) {
+	// The filename in `cat users.csv | cmd` lives in the other process's argv,
+	// not in the pipe. Resolving one to a name would be a guess.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	if path, ok := StdinPath(r); ok {
+		t.Errorf("a pipe must not resolve to a path, got %q", path)
+	}
+}
+
+func TestStdinPathRecoversARedirect(t *testing.T) {
+	// The whole point: `cmd "..." < users.csv` should be as good as naming it.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "users.csv")
+	if err := os.WriteFile(p, []byte("id,email\n1,a@b.c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	got, ok := StdinPath(f)
+	if !ok {
+		t.Skipf("this platform cannot recover a descriptor's path")
+	}
+	if !strings.HasSuffix(got, "users.csv") {
+		t.Errorf("StdinPath = %q, want the real file", got)
+	}
+}

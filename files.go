@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -155,31 +154,46 @@ func expandHome(p string) string {
 
 // StdinPath recovers the filename behind a redirect.
 //
-// `cmd "..." < users.csv` hands us a file descriptor with no name attached, but
-// on Linux the kernel exposes the path through /proc/self/fd/0. When that
-// works, a redirect becomes as good as naming the file. A pipe
-// (`cat users.csv | cmd`) has no path, so this reports false there.
+// `cmd "..." < users.csv` hands over a file descriptor with no name attached,
+// but the kernel still knows which file it points at. Recovering it turns the
+// shortest way to invoke this tool into the best one: the command gets the real
+// path, so it can edit the file in place and be re-run afterwards.
+//
+// A pipe (`cat users.csv | cmd`) genuinely has no path -- the filename lives in
+// the other process's argv, not in the pipe -- so this reports false there, as
+// it does for process substitution and here-strings, which are also pipes or
+// deleted temporary files.
 func StdinPath(stdin *os.File) (string, bool) {
-	if runtime.GOOS != "linux" {
-		return "", false
-	}
 	info, err := stdin.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return "", false
 	}
-	target, err := os.Readlink("/proc/self/fd/0")
-	if err != nil || !filepath.IsAbs(target) {
+	target, ok := stdinPathRaw(stdin)
+	if !ok || !filepath.IsAbs(target) {
 		return "", false
 	}
-	// A deleted or anonymous file resolves to a decorated string rather than a
-	// usable path, and pipes resolve to pipe:[12345].
+	// An anonymous or deleted file resolves to a decorated string rather than a
+	// usable path: pipes read as pipe:[12345], and a here-string is a temporary
+	// file the shell has already unlinked.
 	if strings.HasSuffix(target, " (deleted)") || strings.Contains(target, ":[") {
 		return "", false
 	}
-	if st, err := os.Stat(target); err != nil || !st.Mode().IsRegular() {
+	// The name must still lead back to the same file. This is the check that
+	// makes the whole thing safe to act on rather than merely plausible.
+	if !sameFile(info, target) {
 		return "", false
 	}
 	return relativeIfUnder(target), true
+}
+
+// sameFile reports whether path names the file that was actually opened,
+// guarding against a path that has since been replaced or removed.
+func sameFile(info os.FileInfo, path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	return os.SameFile(info, st)
 }
 
 // relativeIfUnder shortens a path that lives under the working directory, so
