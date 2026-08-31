@@ -21,9 +21,15 @@ import (
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-// maxCommandTokens bounds the answer. A shell command is short, and a low cap
-// keeps a confused model from billing for an essay.
-const maxCommandTokens = 400
+// maxCommandTokens bounds the answer, keeping a confused model from billing for
+// an essay.
+//
+// It is far larger than a shell command needs because reasoning tokens are
+// counted against it too. Several of the fast models have reasoning switched on
+// and cannot turn it off, so a cap tight enough for the command alone would
+// truncate the answer to nothing on exactly the models this backend is for.
+// Nothing is billed for room that goes unused.
+const maxCommandTokens = 2000
 
 type orMessage struct {
 	Role    string `json:"role"`

@@ -130,3 +130,34 @@ func TestVisibleWidthIgnoresColour(t *testing.T) {
 		t.Errorf("visibleWidth = %d, want 2", got)
 	}
 }
+
+func TestUTF8SequenceLen(t *testing.T) {
+	// The terminal hands over bytes. Treating each as a rune turns every
+	// accented letter into mojibake as soon as it is echoed back.
+	tests := []struct {
+		b    byte
+		want int
+	}{
+		{'a', 0},  // ASCII never reaches this path
+		{0xC3, 2}, // é
+		{0xE2, 3}, // ›
+		{0xF0, 4}, // emoji
+		{0xA9, 0}, // a continuation byte cannot start a character
+		{0xFF, 0}, // not a valid leader at all
+	}
+	for _, tt := range tests {
+		if got := utf8SequenceLen(tt.b); got != tt.want {
+			t.Errorf("utf8SequenceLen(%#x) = %d, want %d", tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestOpenRouterLeavesRoomForReasoning(t *testing.T) {
+	// Reasoning tokens count against max_tokens, and the models this backend
+	// exists for cannot always switch reasoning off. A cap sized for the
+	// command alone would truncate the answer away entirely.
+	req := buildOpenRouterRequest(DefaultConfig(), "list files", false)
+	if req.MaxTokens < 1000 {
+		t.Errorf("max_tokens = %d, too tight to survive a reasoning model", req.MaxTokens)
+	}
+}

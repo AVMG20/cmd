@@ -192,12 +192,14 @@ func run() int {
 	}
 	fmt.Fprintln(os.Stdout)
 
-	if quiet {
-		return 0
-	}
-
+	// -c is an explicit instruction, so it is honoured even when output is
+	// redirected: the command still goes to stdout, and a copy is still made.
 	if copyOnly {
 		return reportCopy(os.Stderr, cmdText, p)
+	}
+
+	if quiet {
+		return 0
 	}
 
 	// The piped data was consumed to build the sample and cannot be replayed,

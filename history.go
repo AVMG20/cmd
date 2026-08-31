@@ -30,7 +30,7 @@ func LoadHistory() *History {
 	h := &History{path: historyPath()}
 	f, err := os.Open(h.path)
 	if err != nil {
-		h.pos = 0
+		h.pos = len(h.entries)
 		return h
 	}
 	defer f.Close()

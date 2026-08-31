@@ -36,8 +36,8 @@ func newRawPrompter(out io.Writer, term *rawTerminal, p palette) *prompter {
 
 // readLine returns the next line without its terminator, and false at EOF.
 func (w *prompter) readLine() (string, bool) {
-	if w.term != nil {
-		return w.readLineRaw()
+	if w.in == nil {
+		return "", false
 	}
 	line, err := w.in.ReadString('\n')
 	if line == "" && err != nil {
@@ -71,14 +71,14 @@ func (w *prompter) Select(question string, choices []Choice, current int) (strin
 	}
 	out, p := w.out, w.p
 
-	term := w.term
-	if term == nil {
-		var ok bool
-		if term, ok = enterRaw(); !ok {
-			return w.selectByNumber(question, choices, current)
-		}
-		defer term.Restore()
+	// Without a terminal to drive, fall back to a numbered list. Opening raw
+	// mode here instead would mean opening and closing it once per question,
+	// and each teardown leaves a read parked on the tty that swallows the
+	// first keystroke of the next one.
+	if w.term == nil {
+		return w.selectByNumber(question, choices, current)
 	}
+	term := w.term
 
 	fmt.Fprintf(out, "%s\r\n", p.Cyan(question))
 	drawChoices(out, p, choices, current, false)
@@ -170,11 +170,27 @@ func (w *prompter) selectByNumber(question string, choices []Choice, current int
 // The terminal is left in its normal cooked mode here on purpose: this is the
 // one place the user needs echo, backspace and paste to behave as usual.
 func (w *prompter) Prompt(question, def string) string {
+	label := w.p.Cyan(question) + " "
 	if def != "" {
-		fmt.Fprintf(w.out, "%s %s ", w.p.Cyan(question), w.p.Dim("["+def+"]"))
-	} else {
-		fmt.Fprintf(w.out, "%s ", w.p.Cyan(question))
+		label += w.p.Dim("["+def+"]") + " "
 	}
+
+	// On a raw terminal the label has to belong to the editor: the editor
+	// redraws from column zero, so a label printed separately would vanish
+	// under the first keystroke.
+	if w.term != nil {
+		editor := NewEditor(w.out, w.term, w.p, label, ".", nil)
+		line, result := editor.Read("")
+		if result != EditSubmit {
+			return def
+		}
+		if line = strings.TrimSpace(line); line == "" {
+			return def
+		}
+		return line
+	}
+
+	fmt.Fprint(w.out, label)
 	answer, ok := w.readLine()
 	if !ok {
 		fmt.Fprintln(w.out)
@@ -184,15 +200,6 @@ func (w *prompter) Prompt(question, def string) string {
 		return def
 	}
 	return answer
-}
-
-// readLineRaw edits a line on an already-raw terminal, which the plain reader
-// cannot do: raw mode echoes nothing and translates nothing, so backspace and
-// the characters themselves have to be handled by an editor.
-func (w *prompter) readLineRaw() (string, bool) {
-	editor := NewEditor(w.out, w.term, w.p, "", ".", nil)
-	line, result := editor.Read("")
-	return line, result == EditSubmit
 }
 
 // masked renders a secret so it can be recognised without being disclosed --

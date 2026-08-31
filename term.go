@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Raw-mode terminal input, used by the confirmation prompt and the configure
@@ -64,6 +67,10 @@ type rawTerminal struct {
 	// byte that arrives after the deadline stays queued for the next read
 	// instead of being consumed by an abandoned Read call.
 	bytes chan byte
+	// closeOnce guards teardown. The descriptor is deliberately not cleared
+	// afterwards: the pump goroutine reads it every iteration, and clearing it
+	// would be a data race with a nil dereference at the end of it.
+	closeOnce sync.Once
 }
 
 // enterRaw switches the controlling terminal to raw mode.
@@ -106,18 +113,42 @@ func (r *rawTerminal) pump() {
 }
 
 // Restore returns the terminal to the state it was in. It is safe to call more
-// than once.
+// than once, and safe to call while the pump is mid-read.
 func (r *rawTerminal) Restore() {
-	if r == nil || r.tty == nil {
+	if r == nil {
 		return
 	}
-	if r.saved != "" {
-		_, _ = stty(r.tty, r.saved)
-	} else {
-		_, _ = stty(r.tty, "-raw", "echo")
+	r.closeOnce.Do(func() {
+		if r.saved != "" {
+			_, _ = stty(r.tty, r.saved)
+		} else {
+			_, _ = stty(r.tty, "-raw", "echo")
+		}
+		// Closing unblocks the pump, which then exits on the read error.
+		r.tty.Close()
+	})
+}
+
+// Width reports the terminal's column count, falling back to a conventional 80
+// when it cannot be determined.
+func (r *rawTerminal) Width() int {
+	const fallback = 80
+	if r == nil || r.tty == nil {
+		return fallback
 	}
-	r.tty.Close()
-	r.tty = nil
+	out, err := stty(r.tty, "size")
+	if err != nil {
+		return fallback
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return fallback
+	}
+	cols, err := strconv.Atoi(fields[1])
+	if err != nil || cols < minInputWidth {
+		return fallback
+	}
+	return cols
 }
 
 func stty(tty *os.File, args ...string) (string, error) {
@@ -180,7 +211,52 @@ func (r *rawTerminal) ReadKey() Key {
 	case 27:
 		return r.readEscape()
 	}
+	if b >= utf8.RuneSelf {
+		return r.readMultibyte(b)
+	}
 	return Key{Rune: rune(b)}
+}
+
+// readMultibyte assembles one UTF-8 character from its bytes.
+//
+// The terminal delivers bytes, not characters. Treating each one as a rune
+// turns every accented letter, dash and emoji into mojibake the moment it is
+// echoed back, so the continuation bytes are gathered here instead.
+func (r *rawTerminal) readMultibyte(first byte) Key {
+	size := utf8SequenceLen(first)
+	if size == 0 {
+		// A stray continuation byte or an invalid leader: nothing sensible to
+		// insert, so it is dropped rather than corrupting the line.
+		return Key{Name: KeyNone}
+	}
+	buf := make([]byte, 1, size)
+	buf[0] = first
+	for len(buf) < size {
+		b, ok := r.readByte(escapeGrace)
+		if !ok {
+			return Key{Name: KeyNone}
+		}
+		buf = append(buf, b)
+	}
+	rn, n := utf8.DecodeRune(buf)
+	if rn == utf8.RuneError && n <= 1 {
+		return Key{Name: KeyNone}
+	}
+	return Key{Rune: rn}
+}
+
+// utf8SequenceLen reports how many bytes the character starting with b
+// occupies, or zero when b cannot start one.
+func utf8SequenceLen(b byte) int {
+	switch {
+	case b&0xE0 == 0xC0:
+		return 2
+	case b&0xF0 == 0xE0:
+		return 3
+	case b&0xF8 == 0xF0:
+		return 4
+	}
+	return 0
 }
 
 // readEscape distinguishes a bare Escape from an arrow key.

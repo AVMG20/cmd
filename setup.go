@@ -36,17 +36,33 @@ const customChoice = "\x00custom"
 
 // Configure walks the user through the settings that matter and writes them.
 // It returns the exit code for the process.
+// Configure runs the wizard from the command line.
+//
+// Raw mode is taken once for the whole wizard rather than per question,
+// because each teardown leaves a read parked on the terminal that swallows the
+// first keystroke of whatever asks next.
 func Configure(out io.Writer, in io.Reader, p palette) int {
+	// Only drive the terminal when the answers are actually coming from it.
+	// A controlling terminal exists even when stdin is a pipe, so reaching for
+	// it unconditionally would ignore piped answers and wait for a keypress
+	// nobody is there to give.
+	if isTerminal(os.Stdin) {
+		if term, ok := enterRaw(); ok {
+			defer term.Restore()
+			return configure(newRawPrompter(out, term, p), crlfWriter{out}, p)
+		}
+	}
 	return configure(newPrompter(out, in, p), out, p)
 }
 
 // ConfigureRaw runs the wizard from inside the harness, over a terminal that is
-// already in raw mode.
+// already raw. The caller owns both the terminal and the newline translation.
 func ConfigureRaw(out io.Writer, term *rawTerminal, p palette) int {
 	return configure(newRawPrompter(out, term, p), out, p)
 }
 
 func configure(w *prompter, out io.Writer, p palette) int {
+	w.out = out
 	path, err := ConfigPath()
 	if err != nil {
 		fmt.Fprintf(out, "%s could not work out where the config lives: %v\n", p.Red("Error:"), err)

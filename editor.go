@@ -31,7 +31,16 @@ type Editor struct {
 	// drawnLines is how many lines the last render occupied, so the next one
 	// can erase exactly that much.
 	drawnLines int
+	// width is the terminal's column count, sampled once per session of
+	// editing. The input is kept to a single line by scrolling it sideways,
+	// which is what makes the cursor arithmetic below correct: a line allowed
+	// to wrap would put the cursor on the wrong row entirely.
+	width int
 }
+
+// minInputWidth is the narrowest the input area is allowed to get, so an
+// unreadable terminal size cannot collapse it to nothing.
+const minInputWidth = 20
 
 // EditResult says how an editing session ended.
 type EditResult int
@@ -62,6 +71,7 @@ func (e *Editor) Read(initial string) (string, EditResult) {
 	e.suggestions = nil
 	e.selected = 0
 	e.drawnLines = 0
+	e.width = e.term.Width()
 	e.render()
 
 	for {
@@ -200,25 +210,32 @@ func (e *Editor) completionIsNoop() bool {
 		return true
 	}
 	choice := e.suggestions[e.selected]
-	line := string(e.line)
-	if _, prefix, ok := activeToken(line, e.cursor, '@'); ok {
+	line, at := e.lineAndOffset()
+	if _, prefix, ok := activeToken(line, at, '@'); ok {
 		return prefix == choice.Text
 	}
-	if start, prefix, ok := activeToken(line, e.cursor, '/'); ok {
+	if start, prefix, ok := activeToken(line, at, '/'); ok {
 		return start == 0 && "/"+prefix == strings.TrimSpace(choice.Text)
 	}
 	return false
 }
 
 func (e *Editor) completionsForCursor() []Completion {
-	line := string(e.line)
-	if _, prefix, ok := activeToken(line, e.cursor, '@'); ok {
+	line, at := e.lineAndOffset()
+	if _, prefix, ok := activeToken(line, at, '@'); ok {
 		return CompleteFiles(e.root, prefix)
 	}
-	if _, prefix, ok := activeToken(line, e.cursor, '/'); ok {
+	if _, prefix, ok := activeToken(line, at, '/'); ok {
 		return CompleteSlash("/" + prefix)
 	}
 	return nil
+}
+
+// lineAndOffset renders the line and converts the cursor from a rune index to
+// the byte offset the string-based helpers expect. Mixing the two silently
+// misreads any line containing a character outside ASCII.
+func (e *Editor) lineAndOffset() (string, int) {
+	return string(e.line), len(string(e.line[:e.cursor]))
 }
 
 // acceptCompletion replaces the token under the cursor with the selection.
@@ -227,13 +244,13 @@ func (e *Editor) acceptCompletion() {
 		return
 	}
 	choice := e.suggestions[e.selected]
-	line := string(e.line)
+	line, at := e.lineAndOffset()
 
 	marker := byte('@')
-	start, _, ok := activeToken(line, e.cursor, '@')
+	start, _, ok := activeToken(line, at, '@')
 	if !ok {
 		marker = '/'
-		start, _, ok = activeToken(line, e.cursor, '/')
+		start, _, ok = activeToken(line, at, '/')
 	}
 	if !ok {
 		return
@@ -245,9 +262,9 @@ func (e *Editor) acceptCompletion() {
 	if marker == '/' {
 		replacement = choice.Text
 	}
-	updated := line[:start] + replacement + line[e.cursor:]
-	e.line = []rune(updated)
-	e.cursor = len([]rune(line[:start] + replacement))
+	head := line[:start] + replacement
+	e.line = []rune(head + line[at:])
+	e.cursor = len([]rune(head))
 
 	// A directory is a step on the way somewhere, so its list stays open.
 	if strings.HasSuffix(choice.Text, "/") {
@@ -326,7 +343,8 @@ func (e *Editor) render() {
 	}
 	fmt.Fprint(e.out, "\r\033[J")
 
-	fmt.Fprintf(e.out, "%s%s", e.p.Yellow(e.prompt), string(e.line))
+	visible, cursorCol := e.window()
+	fmt.Fprintf(e.out, "%s%s", e.p.Yellow(e.prompt), visible)
 
 	lines := 1
 	for i, s := range e.suggestions {
@@ -351,7 +369,35 @@ func (e *Editor) render() {
 	if lines > 1 {
 		fmt.Fprintf(e.out, "\033[%dA", lines-1)
 	}
-	fmt.Fprintf(e.out, "\r\033[%dC", visibleWidth(e.prompt)+e.cursor)
+	if cursorCol > 0 {
+		fmt.Fprintf(e.out, "\r\033[%dC", cursorCol)
+	} else {
+		fmt.Fprint(e.out, "\r")
+	}
+}
+
+// window returns the slice of the line that fits on screen, and the column the
+// cursor belongs in. A line longer than the terminal scrolls under the cursor
+// rather than wrapping.
+func (e *Editor) window() (string, int) {
+	promptWidth := visibleWidth(e.prompt)
+	avail := e.width - promptWidth - 1
+	if avail < minInputWidth {
+		avail = minInputWidth
+	}
+	if len(e.line) <= avail {
+		return string(e.line), promptWidth + e.cursor
+	}
+	// Keep the cursor in view, preferring to show what comes before it.
+	start := e.cursor - avail
+	if start < 0 {
+		start = 0
+	}
+	end := start + avail
+	if end > len(e.line) {
+		end = len(e.line)
+	}
+	return string(e.line[start:end]), promptWidth + (e.cursor - start)
 }
 
 // finish clears the completion list and leaves the cursor on a fresh line.

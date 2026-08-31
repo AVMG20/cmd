@@ -34,9 +34,16 @@ func CollectFiles(query string, explicit []string, cfg Config) []FileInput {
 	var out []FileInput
 	seen := map[string]bool{}
 
+	// The cap exists to stop a rambling request opening half the tree. A file
+	// named with -f was asked for deliberately, so it is never what gets
+	// dropped: only auto-detected paths count against the limit.
+	autoDetected := 0
 	add := func(raw string, required bool) {
-		if len(out) >= cfg.MaxAutoFiles {
-			return
+		if !required {
+			if autoDetected >= cfg.MaxAutoFiles {
+				return
+			}
+			autoDetected++
 		}
 		path, abs, ok := resolveFile(raw)
 		if !ok {

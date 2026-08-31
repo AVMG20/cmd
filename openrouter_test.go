@@ -97,8 +97,11 @@ func TestOpenRouterRequestPinsReasoningLowByDefault(t *testing.T) {
 	if req.Temperature != 0 {
 		t.Errorf("temperature = %v, want 0 for a deterministic command", req.Temperature)
 	}
-	if req.MaxTokens <= 0 || req.MaxTokens > 1000 {
-		t.Errorf("max_tokens = %d, want a small bound", req.MaxTokens)
+	// A bound must exist so a confused model cannot bill for an essay. How
+	// tight it can be is asserted separately: reasoning tokens count against
+	// it, so "small" is not the goal.
+	if req.MaxTokens <= 0 {
+		t.Error("max_tokens must be bounded")
 	}
 	if !req.Stream {
 		t.Error("the response should stream so the preview can render")

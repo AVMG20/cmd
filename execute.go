@@ -80,13 +80,16 @@ func ConfirmInteractive(out io.Writer, term *rawTerminal, p palette, risks []str
 }
 
 // confirmRisky reads a typed word through the harness's own line editor.
+//
+// The question goes on its own line above the input rather than in front of
+// it. The editor redraws its line from column zero, so anything printed on the
+// same line would be erased by the first keystroke.
 func confirmRisky(out io.Writer, term *rawTerminal, p palette, risks []string, allowEdit bool) Action {
 	showRisks(out, p, risks)
-	question := "Type 'yes' to run it, 'c' to copy, 'e' to edit, anything else aborts: "
-	fmt.Fprint(out, "\n"+p.Red(question))
+	fmt.Fprintf(out, "\n%s\n", p.Red("Type 'yes' to run it, 'c' to copy, 'e' to edit, anything else aborts."))
 	term.Drain()
 
-	editor := NewEditor(out, term, p, "", ".", nil)
+	editor := NewEditor(out, term, p, "› ", ".", nil)
 	line, result := editor.Read("")
 	if result != EditSubmit {
 		return ActionAbort

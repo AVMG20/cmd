@@ -160,3 +160,41 @@ func TestStdinPathRecoversARedirect(t *testing.T) {
 		t.Errorf("StdinPath = %q, want the real file", got)
 	}
 }
+
+func TestCollectFilesNeverDropsAnExplicitFile(t *testing.T) {
+	// The cap guards against a rambling request opening half the tree. A file
+	// named with -f was asked for on purpose and must survive it.
+	dir := t.TempDir()
+	var paths []string
+	for _, n := range []string{"a.json", "b.json", "c.json", "d.json", "e.json"} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	cfg := DefaultConfig()
+	cfg.MaxAutoFiles = 2
+
+	files := CollectFiles("tidy these up", paths, cfg)
+	if len(files) != len(paths) {
+		t.Errorf("got %d files, want all %d explicit ones kept", len(files), len(paths))
+	}
+}
+
+func TestCollectFilesStillCapsAutoDetection(t *testing.T) {
+	dir := t.TempDir()
+	var mentioned []string
+	for _, n := range []string{"a.json", "b.json", "c.json", "d.json"} {
+		p := filepath.Join(dir, n)
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mentioned = append(mentioned, p)
+	}
+	cfg := DefaultConfig()
+	cfg.MaxAutoFiles = 2
+	if files := CollectFiles(strings.Join(mentioned, " "), nil, cfg); len(files) != 2 {
+		t.Errorf("got %d files, want the cap to hold at 2", len(files))
+	}
+}
