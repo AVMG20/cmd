@@ -1,6 +1,11 @@
 {
+  "provider": "openrouter",
+  "openrouter_model": "google/gemini-3.7-flash",
   "model": "haiku",
-  "claude_path": "claude",
+  "agy_path": "agy",
+  "agy_model": "",
+  "auto_read_files": true,
+  "max_auto_files": 3,
   "max_pipe_chars": 4000,
   "sample_read_bytes": 262144,
   "enable_think": false,

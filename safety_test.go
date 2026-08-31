@@ -94,18 +94,22 @@ func TestRisksDeduplicatesReasons(t *testing.T) {
 	}
 }
 
+// Confirm prefers a single keypress on a real terminal; these tests exercise
+// the line-reading fallback, which is what runs when there is no tty.
 func TestConfirmSafeCommand(t *testing.T) {
 	tests := []struct {
 		answer string
-		want   bool
+		want   Action
 	}{
-		{"y\n", true},
-		{"Y\n", true},
-		{"yes\n", true},
-		{"n\n", false},
-		{"\n", false},
-		{"maybe\n", false},
-		{"", false}, // EOF, e.g. stdin already consumed by a pipe
+		{"y\n", ActionRun},
+		{"Y\n", ActionRun},
+		{"yes\n", ActionRun},
+		{"c\n", ActionCopy},
+		{"copy\n", ActionCopy},
+		{"n\n", ActionAbort},
+		{"\n", ActionAbort},
+		{"maybe\n", ActionAbort},
+		{"", ActionAbort}, // EOF, e.g. stdin already consumed by a pipe
 	}
 	for _, tt := range tests {
 		t.Run(tt.answer, func(t *testing.T) {
@@ -121,13 +125,14 @@ func TestConfirmSafeCommand(t *testing.T) {
 func TestConfirmRiskyCommandRequiresFullYes(t *testing.T) {
 	tests := []struct {
 		answer string
-		want   bool
+		want   Action
 	}{
-		{"yes\n", true},
-		{"YES\n", true},
-		{"y\n", false}, // a single "y" must not be enough here
-		{"\n", false},
-		{"", false},
+		{"yes\n", ActionRun},
+		{"YES\n", ActionRun},
+		{"c\n", ActionCopy},  // copying is not destructive, so one key is fine
+		{"y\n", ActionAbort}, // a single "y" must not be enough here
+		{"\n", ActionAbort},
+		{"", ActionAbort},
 	}
 	for _, tt := range tests {
 		t.Run(tt.answer, func(t *testing.T) {

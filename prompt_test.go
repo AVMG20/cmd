@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildUserMessageWithoutInput(t *testing.T) {
-	msg := buildUserMessage("list big files", Sample{})
+	msg := buildUserMessage("list big files", Sample{}, nil)
 	if !strings.Contains(msg, "list big files") {
 		t.Error("the request must appear in the message")
 	}
@@ -21,7 +21,7 @@ func TestBuildUserMessageWithoutInput(t *testing.T) {
 
 func TestBuildUserMessageVerbatimInput(t *testing.T) {
 	s := Sample{Format: "json", Summary: `{"users":[{"id":1}]}`, Verbatim: true}
-	msg := buildUserMessage("extract user ids", s)
+	msg := buildUserMessage("extract user ids", s, nil)
 	if !strings.Contains(msg, "<<<INPUT") || !strings.Contains(msg, `{"users":[{"id":1}]}`) {
 		t.Error("the complete sample must be delimited and included")
 	}
@@ -32,7 +32,7 @@ func TestBuildUserMessageVerbatimInput(t *testing.T) {
 
 func TestBuildUserMessageSummarizedInput(t *testing.T) {
 	s := Sample{Format: "json", Summary: "Root: array (at least 500 elements)", Truncated: true}
-	msg := buildUserMessage("count records", s)
+	msg := buildUserMessage("count records", s, nil)
 	if !strings.Contains(msg, "Root: array") {
 		t.Error("the structure summary must be included")
 	}
@@ -88,8 +88,9 @@ func TestSystemPromptRules(t *testing.T) {
 	for _, want := range []string{
 		"Output ONLY the command",
 		"markdown code fences",
-		"names a file or path",
-		"MUST read from stdin",
+		"MUST operate on that path by name",
+		"MUST read stdin",
+		"Never redirect a command's output into the same file",
 	} {
 		if !strings.Contains(systemPrompt, want) {
 			t.Errorf("system prompt is missing the %q rule", want)
@@ -123,5 +124,44 @@ func TestDescribeShellFallback(t *testing.T) {
 	t.Setenv("SHELL", "")
 	if got := describeShell(); got == "" {
 		t.Error("describeShell() must never return an empty string")
+	}
+}
+
+func TestBuildUserMessageNamesFiles(t *testing.T) {
+	// The whole point of resolving a path is that the command can target it,
+	// so the path has to reach the model.
+	files := []FileInput{{
+		Path:   "users.csv",
+		Sample: Sample{Format: "csv", Summary: "The input is CSV with 3 columns", Verbatim: false},
+	}}
+	msg := buildUserMessage("strip the email column", Sample{}, files)
+
+	if !strings.Contains(msg, "File: users.csv") {
+		t.Errorf("the path must be stated, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "The input is CSV with 3 columns") {
+		t.Error("the structure must accompany the path")
+	}
+	if strings.Contains(msg, "Piped input") {
+		t.Error("a named file is not piped input")
+	}
+}
+
+func TestBuildUserMessageDistinguishesPipeFromFile(t *testing.T) {
+	piped := Sample{Format: "json", Summary: `[{"id":1}]`, Verbatim: true}
+	msg := buildUserMessage("count them", piped, nil)
+	if !strings.Contains(msg, "Piped input on stdin (no path available)") {
+		t.Errorf("piped data must be labelled as having no path, got:\n%s", msg)
+	}
+}
+
+func TestBuildUserMessageUnreadableFileStillNamesIt(t *testing.T) {
+	files := []FileInput{{Path: "/backups/db.sql.gz"}}
+	msg := buildUserMessage("restore it", Sample{}, files)
+	if !strings.Contains(msg, "/backups/db.sql.gz") {
+		t.Error("a path that could not be read is still the path to use")
+	}
+	if !strings.Contains(msg, "contents unavailable") {
+		t.Error("the model should be told why no structure follows")
 	}
 }
