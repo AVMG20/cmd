@@ -37,7 +37,16 @@ const customChoice = "\x00custom"
 // Configure walks the user through the settings that matter and writes them.
 // It returns the exit code for the process.
 func Configure(out io.Writer, in io.Reader, p palette) int {
-	w := newPrompter(out, in, p)
+	return configure(newPrompter(out, in, p), out, p)
+}
+
+// ConfigureRaw runs the wizard from inside the harness, over a terminal that is
+// already in raw mode.
+func ConfigureRaw(out io.Writer, term *rawTerminal, p palette) int {
+	return configure(newRawPrompter(out, term, p), out, p)
+}
+
+func configure(w *prompter, out io.Writer, p palette) int {
 	path, err := ConfigPath()
 	if err != nil {
 		fmt.Fprintf(out, "%s could not work out where the config lives: %v\n", p.Red("Error:"), err)
@@ -90,7 +99,11 @@ func Configure(out io.Writer, in io.Reader, p palette) int {
 	fmt.Fprintf(out, "\n%s %s\n", p.Green("✓"), "Saved to "+path)
 	fmt.Fprintf(out, "  provider  %s\n", cfg.Provider)
 	fmt.Fprintf(out, "  model     %s\n", cfg.ActiveModel())
-	fmt.Fprintf(out, "\n%s\n", p.Dim(`Try it:  cmd "show the 10 biggest files here"`))
+	if w.term == nil {
+		// Inside the harness there is already a prompt waiting; telling the
+		// user to go and run cmd would be advice to do what they are doing.
+		fmt.Fprintf(out, "\n%s\n", p.Dim(`Try it:  cmd "show the 10 biggest files here"`))
+	}
 	return 0
 }
 

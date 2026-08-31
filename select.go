@@ -19,14 +19,26 @@ type prompter struct {
 	out io.Writer
 	in  *bufio.Reader
 	p   palette
+	// term is set when the caller already holds the terminal in raw mode. The
+	// wizard then reads through it instead of switching modes, because giving
+	// raw mode up and taking it back costs a keypress.
+	term *rawTerminal
 }
 
 func newPrompter(out io.Writer, in io.Reader, p palette) *prompter {
 	return &prompter{out: out, in: bufio.NewReader(in), p: p}
 }
 
+// newRawPrompter builds a prompter over a terminal that is already raw.
+func newRawPrompter(out io.Writer, term *rawTerminal, p palette) *prompter {
+	return &prompter{out: out, p: p, term: term}
+}
+
 // readLine returns the next line without its terminator, and false at EOF.
 func (w *prompter) readLine() (string, bool) {
+	if w.term != nil {
+		return w.readLineRaw()
+	}
 	line, err := w.in.ReadString('\n')
 	if line == "" && err != nil {
 		return "", false
@@ -59,11 +71,14 @@ func (w *prompter) Select(question string, choices []Choice, current int) (strin
 	}
 	out, p := w.out, w.p
 
-	term, ok := enterRaw()
-	if !ok {
-		return w.selectByNumber(question, choices, current)
+	term := w.term
+	if term == nil {
+		var ok bool
+		if term, ok = enterRaw(); !ok {
+			return w.selectByNumber(question, choices, current)
+		}
+		defer term.Restore()
 	}
-	defer term.Restore()
 
 	fmt.Fprintf(out, "%s\r\n", p.Cyan(question))
 	drawChoices(out, p, choices, current, false)
@@ -169,6 +184,15 @@ func (w *prompter) Prompt(question, def string) string {
 		return def
 	}
 	return answer
+}
+
+// readLineRaw edits a line on an already-raw terminal, which the plain reader
+// cannot do: raw mode echoes nothing and translates nothing, so backspace and
+// the characters themselves have to be handled by an editor.
+func (w *prompter) readLineRaw() (string, bool) {
+	editor := NewEditor(w.out, w.term, w.p, "", ".", nil)
+	line, result := editor.Read("")
+	return line, result == EditSubmit
 }
 
 // masked renders a secret so it can be recognised without being disclosed --

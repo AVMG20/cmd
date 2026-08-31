@@ -72,20 +72,37 @@ func TestActionForKey(t *testing.T) {
 	}{
 		{Key{Rune: 'y'}, ActionRun},
 		{Key{Rune: 'Y'}, ActionRun},
+		{Key{Rune: 'r'}, ActionRun},
 		{Key{Rune: 'c'}, ActionCopy},
 		{Key{Rune: 'C'}, ActionCopy},
+		{Key{Rune: 'e'}, ActionEdit},
 		{Key{Rune: 'n'}, ActionAbort},
 		{Key{Rune: 'q'}, ActionAbort},
 		{Key{Name: KeyEsc}, ActionAbort},
 		{Key{Name: KeyInterrupt}, ActionAbort},
+		{Key{Name: KeyEOF}, ActionAbort},
 		// Enter is as likely to be left over from typing the request as it is
 		// to be an answer, so it must not run anything.
 		{Key{Name: KeyEnter}, ActionAbort},
 	}
 	for _, tt := range tests {
-		if got := actionForKey(tt.key); got != tt.want {
+		if got := actionForKey(tt.key, false); got != tt.want {
 			t.Errorf("actionForKey(%+v) = %v, want %v", tt.key, got, tt.want)
 		}
+	}
+}
+
+func TestActionForKeyWithCopyMode(t *testing.T) {
+	// /copy changes what the affirmative key does, but an explicit key must
+	// keep meaning what it says.
+	if got := actionForKey(Key{Rune: 'y'}, true); got != ActionCopy {
+		t.Errorf("y in copy mode = %v, want copy", got)
+	}
+	if got := actionForKey(Key{Rune: 'r'}, true); got != ActionRun {
+		t.Errorf("r in copy mode = %v, want run: an explicit key must not be remapped", got)
+	}
+	if got := actionForKey(Key{Rune: 'c'}, true); got != ActionCopy {
+		t.Errorf("c in copy mode = %v, want copy", got)
 	}
 }
 

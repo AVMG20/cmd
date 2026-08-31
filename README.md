@@ -12,6 +12,28 @@ Execute? [y] run  [c] copy  [n] cancel
 
 One keypress decides. No Enter, no typing `y` then Return.
 
+Or run `cmd` with nothing and type the request there, where `@` completes file
+paths and `/` opens a command palette:
+
+```
+$ cmd
+cmd 0.3.0
+openrouter · google/gemini-3.7-flash
+@ for files · / for commands · ctrl-d to leave
+
+› strip the email column from @users.csv
+                               ❯ users.csv
+                                 src/models/users.go
+
+> awk -F, -v OFS=, '{$3=""; print}' users.csv > users.tmp && mv users.tmp users.csv
+
+Execute? [y] run  [c] copy  [e] edit  [n] cancel
+```
+
+It is not a shell and not an agent: it answers one request and exits on run,
+copy or cancel. `cmd "..."` is still there and still faster when the request is
+already in your head.
+
 ## Install
 
 Needs Go 1.23+.
@@ -81,6 +103,34 @@ cmd "delete node_modules folders under here"         # find . -name node_modules
 
 Exit codes: `0` ok, `1` error, `2` you aborted. Otherwise the exit code of the
 command that ran.
+
+## The harness
+
+Run `cmd` with no request.
+
+| | |
+|---|---|
+| `@name` | Complete a file path from the current directory. Matches anywhere in the path, so `@users` finds `src/models/users.go`. |
+| `/` | Command palette, with descriptions. |
+| `tab` | Open or cycle completions. |
+| `up` / `down` | Previous requests, kept in `~/.cmd-history`. |
+| `e` at the prompt | Edit the generated command before running it. |
+| `ctrl-w` / `ctrl-u` | Delete the last word / the line. |
+| `ctrl-d` | Leave. |
+
+| Command | |
+|---|---|
+| `/config` | The setup wizard, without leaving the session. |
+| `/provider <name>` | Switch backend for this session. |
+| `/model <name>` | Switch model for this session. |
+| `/think` | Toggle reasoning. |
+| `/copy` | Toggle copying instead of running. |
+| `/help` | Everything above. |
+| `/exit` | Leave. |
+
+`@` is the shortest way to name a file, and it sidesteps shell quoting
+entirely — `what's using port 3000` needs no escaping when the shell never
+sees it.
 
 ## Naming a file
 

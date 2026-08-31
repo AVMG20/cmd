@@ -23,9 +23,29 @@ const (
 	KeyEnter     KeyName = "enter"
 	KeyUp        KeyName = "up"
 	KeyDown      KeyName = "down"
+	KeyLeft      KeyName = "left"
+	KeyRight     KeyName = "right"
+	KeyHome      KeyName = "home"
+	KeyEnd       KeyName = "end"
+	KeyDelete    KeyName = "delete"
+	KeyTab       KeyName = "tab"
 	KeyEsc       KeyName = "esc"
 	KeyInterrupt KeyName = "interrupt"
+	KeyEOF       KeyName = "eof"
 	KeyBackspace KeyName = "backspace"
+)
+
+// Control characters the line editor binds, named so the switch that handles
+// them reads as something other than a list of small integers.
+const (
+	ctrlA = 1
+	ctrlB = 2
+	ctrlD = 4
+	ctrlE = 5
+	ctrlF = 6
+	ctrlK = 11
+	ctrlU = 21
+	ctrlW = 23
 )
 
 // Key is one keypress: either a printable rune or a named control key.
@@ -112,6 +132,24 @@ func stty(tty *os.File, args ...string) (string, error) {
 // one burst, so this only ever costs time on an actual Escape press.
 const escapeGrace = 40 * time.Millisecond
 
+// Drain discards input that arrived before now.
+//
+// It is what keeps typing during a slow generation from answering the prompt
+// that appears afterwards: those keystrokes were aimed at a question that had
+// not been asked.
+func (r *rawTerminal) Drain() {
+	for {
+		select {
+		case _, ok := <-r.bytes:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
 // ReadKey blocks for one keypress.
 func (r *rawTerminal) ReadKey() Key {
 	b, ok := r.readByte(0)
@@ -119,12 +157,26 @@ func (r *rawTerminal) ReadKey() Key {
 		return Key{Name: KeyInterrupt}
 	}
 	switch b {
-	case 3, 4: // ctrl-c, ctrl-d
+	case 3: // ctrl-c
 		return Key{Name: KeyInterrupt}
+	case ctrlD:
+		// Distinct from ctrl-c: on an empty line it means "no more input",
+		// which the editor treats as leaving rather than cancelling.
+		return Key{Name: KeyEOF}
 	case '\r', '\n':
 		return Key{Name: KeyEnter}
+	case '\t':
+		return Key{Name: KeyTab}
 	case 127, 8:
 		return Key{Name: KeyBackspace}
+	case ctrlA:
+		return Key{Name: KeyHome}
+	case ctrlE:
+		return Key{Name: KeyEnd}
+	case ctrlB:
+		return Key{Name: KeyLeft}
+	case ctrlF:
+		return Key{Name: KeyRight}
 	case 27:
 		return r.readEscape()
 	}
@@ -141,14 +193,54 @@ func (r *rawTerminal) readEscape() Key {
 	if !ok {
 		return Key{Name: KeyEsc}
 	}
+	// Numeric sequences carry their meaning in digits before a trailing "~".
+	if final >= '0' && final <= '9' {
+		return r.readNumericEscape(final)
+	}
 	switch final {
 	case 'A':
 		return Key{Name: KeyUp}
 	case 'B':
 		return Key{Name: KeyDown}
+	case 'C':
+		return Key{Name: KeyRight}
+	case 'D':
+		return Key{Name: KeyLeft}
+	case 'H':
+		return Key{Name: KeyHome}
+	case 'F':
+		return Key{Name: KeyEnd}
 	}
-	// Some other sequence (page keys, modifiers). Treat it as no-op input
-	// rather than guessing at a meaning.
+	// Some other sequence (modifiers, mouse). Treat it as no-op input rather
+	// than guessing at a meaning.
+	return Key{Name: KeyNone}
+}
+
+// readNumericEscape consumes the rest of a CSI sequence of the form ESC [ N ~.
+func (r *rawTerminal) readNumericEscape(first byte) Key {
+	digits := []byte{first}
+	for len(digits) < 4 {
+		b, ok := r.readByte(escapeGrace)
+		if !ok {
+			return Key{Name: KeyNone}
+		}
+		if b == '~' {
+			break
+		}
+		if b < '0' || b > '9' {
+			// A modifier form such as ESC [ 1 ; 5 C. Not bound; swallow it.
+			return Key{Name: KeyNone}
+		}
+		digits = append(digits, b)
+	}
+	switch string(digits) {
+	case "1", "7":
+		return Key{Name: KeyHome}
+	case "3":
+		return Key{Name: KeyDelete}
+	case "4", "8":
+		return Key{Name: KeyEnd}
+	}
 	return Key{Name: KeyNone}
 }
 

@@ -17,6 +17,7 @@ const version = "0.3.0"
 const usage = `cmd - turn plain English into a shell command.
 
 Usage:
+  cmd                               Open the harness and type a request there
   cmd [flags] "what you want to do"
   <command producing data> | cmd [flags] "what to do with it"
 
@@ -36,6 +37,10 @@ Flags:
 
 At the confirmation prompt a single keypress decides: y runs, c copies, anything
 else cancels. Risky commands still need the word "yes" typed out.
+
+Run cmd with no request to open the harness: @ completes file paths from the
+current directory, / opens the command palette, up and down recall past
+requests, and e at the prompt edits the command before running it.
 
 Examples:
   cmd "show the 10 biggest files in this folder"
@@ -104,10 +109,6 @@ func run() int {
 	}
 
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if query == "" {
-		fmt.Fprint(os.Stderr, usage)
-		return 1
-	}
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -134,6 +135,17 @@ func run() int {
 
 	p := palette{enabled: colorsEnabled() && !quiet}
 
+	// No request on the command line: open the harness, where the request can
+	// be typed with file completion instead of fought through shell quoting.
+	// Without a terminal there is nothing to open, so the usage text stands in.
+	if query == "" {
+		if quiet || !isTerminal(os.Stdin) {
+			fmt.Fprint(os.Stderr, usage)
+			return 1
+		}
+		return Interactive(cfg, p)
+	}
+
 	// A redirect (`cmd "..." < users.csv`) carries a real path even though it
 	// arrives on stdin, so prefer naming the file over describing a stream:
 	// the command can then target it, and stays re-runnable. It goes through
@@ -153,7 +165,7 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "%s\n", p.Dim(describeRequest(cfg, files)))
 	}
 
-	cmdText, err := generateCommand(cfg, userMessage, quiet, p)
+	cmdText, err := generateCommand(os.Stderr, cfg, userMessage, quiet, p)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", p.Red("Error:"), err)
 		return 1
@@ -185,7 +197,7 @@ func run() int {
 	}
 
 	if copyOnly {
-		return reportCopy(cmdText, p)
+		return reportCopy(os.Stderr, cmdText, p)
 	}
 
 	// The piped data was consumed to build the sample and cannot be replayed,
@@ -208,7 +220,7 @@ func run() int {
 	if !yes || len(risks) > 0 {
 		switch Confirm(os.Stderr, in, p, risks) {
 		case ActionCopy:
-			return reportCopy(cmdText, p)
+			return reportCopy(os.Stderr, cmdText, p)
 		case ActionAbort:
 			fmt.Fprintln(os.Stderr, p.Dim("Aborted."))
 			return 2
@@ -225,13 +237,13 @@ func run() int {
 }
 
 // reportCopy puts the command on the clipboard and says where it went.
-func reportCopy(cmdText string, p palette) int {
+func reportCopy(out io.Writer, cmdText string, p palette) int {
 	via, err := Copy(cmdText)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s could not copy: %v\n", p.Red("Error:"), err)
+		fmt.Fprintf(out, "%s could not copy: %v\n", p.Red("Error:"), err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "%s copied to the clipboard %s\n", p.Green("✓"), p.Dim("("+via+")"))
+	fmt.Fprintf(out, "%s copied to the clipboard %s\n", p.Green("✓"), p.Dim("("+via+")"))
 	return 0
 }
 
@@ -311,7 +323,7 @@ func describeKey(cfg Config) string {
 
 // generateCommand streams a response from Claude, showing a live single-line
 // preview on stderr, and returns the sanitized command.
-func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (string, error) {
+func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, p palette) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -329,11 +341,11 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	// "Loading" until the model actually says something: until the first event
 	// arrives we are waiting on the request, not on any reasoning. The label
 	// switches to "Thinking" only once a reasoning block really starts.
-	spinner := NewSpinner(os.Stderr, interactive)
+	spinner := NewSpinner(out, interactive)
 	spinner.Start("Loading")
 
 	var (
-		out          bytes.Buffer
+		answer       bytes.Buffer
 		streamErr    string
 		startedText  bool
 		startedThink bool
@@ -350,28 +362,28 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 			}
 			if !startedThink {
 				spinner.Stop()
-				fmt.Fprintf(os.Stderr, "%s\n%s", p.Dim("reasoning:"), p.dimOn())
+				fmt.Fprintf(out, "%s\n%s", p.Dim("reasoning:"), p.dimOn())
 				startedThink = true
 			}
 			// Written raw: the dim attribute is opened once above and closed
 			// when the block ends.
-			fmt.Fprint(os.Stderr, ev.Text)
+			fmt.Fprint(out, ev.Text)
 
 		case EventText:
-			out.WriteString(ev.Text)
+			answer.WriteString(ev.Text)
 			if !interactive || !streaming {
 				return
 			}
 			if !startedText {
 				spinner.Stop()
 				if startedThink {
-					fmt.Fprintln(os.Stderr, p.reset())
+					fmt.Fprintln(out, p.reset())
 				}
 				startedText = true
 			}
 			// Live preview: rewrite one line so the final, sanitized command
 			// can replace it cleanly without leaving duplicated output.
-			fmt.Fprintf(os.Stderr, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(out.String())))
+			fmt.Fprintf(out, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(answer.String())))
 
 		case EventError:
 			streamErr = ev.Text
@@ -381,12 +393,12 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	genErr := Generate(ctx, cfg, userMessage, cfg.EnableThink, emit)
 	spinner.Stop()
 	if interactive && startedText {
-		fmt.Fprint(os.Stderr, "\r\033[K") // erase the preview
+		fmt.Fprint(out, "\r\033[K") // erase the preview
 	}
 	if interactive && startedThink && !startedText {
 		// Reasoning ran but no command followed; close the dim attribute so it
 		// does not bleed into the shell prompt.
-		fmt.Fprintln(os.Stderr, p.reset())
+		fmt.Fprintln(out, p.reset())
 	}
 
 	if genErr != nil {
@@ -395,7 +407,7 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	if streamErr != "" {
 		return "", errorFromClaude(streamErr)
 	}
-	return Sanitize(out.String()), nil
+	return Sanitize(answer.String()), nil
 }
 
 // previewLine renders the tail of the streamed text on a single line.
