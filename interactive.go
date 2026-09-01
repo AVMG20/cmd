@@ -256,8 +256,8 @@ func (s *session) printHelp() {
 	fmt.Fprintf(s.out, "\n%s\n", s.p.Yellow("Editing"))
 	for _, l := range [][2]string{
 		{"@name", "complete a file path from here"},
-		{"tab", "open or cycle completions"},
-		{"up / down", "previous requests"},
+		{"tab / enter", "accept the highlighted completion"},
+		{"up / down", "move through completions, or previous requests"},
 		{"ctrl-w / ctrl-u", "delete the last word / the line"},
 		{"ctrl-d", "leave"},
 	} {

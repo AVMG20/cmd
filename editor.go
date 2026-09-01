@@ -154,17 +154,21 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 		e.selected = (e.selected - 1 + len(e.suggestions)) % len(e.suggestions)
 	case KeyDown:
 		e.selected = (e.selected + 1) % len(e.suggestions)
-	case KeyTab:
-		// Tab with a list open moves through it, so repeated presses browse
-		// rather than re-opening the same list.
-		e.selected = (e.selected + 1) % len(e.suggestions)
-	case KeyEnter, KeyRight:
-		// When the line already reads exactly like the selection, accepting it
-		// would do nothing and Enter would appear to be ignored. Close the
-		// list and let the key mean what it normally means.
+	case KeyEnter, KeyRight, KeyTab:
+		// Tab accepts the highlighted entry, exactly as Enter does. Moving
+		// through the list is what the arrow keys are for, and giving Tab that
+		// job too made the ordinary case -- one obvious match -- cost two
+		// keypresses where one would do.
 		if e.completionIsNoop() {
+			// The line already reads exactly like the selection, so accepting
+			// it would do nothing and the key would look ignored. Close the
+			// list and let the key mean what it normally means -- except Tab,
+			// which outside a list only reopens the one just closed.
 			e.suggestions = nil
-			return false
+			if key.Name != KeyTab {
+				return false
+			}
+			break
 		}
 		e.acceptCompletion()
 	case KeyEsc:

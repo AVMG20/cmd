@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -130,5 +131,84 @@ func TestEditingAtTheEdgesIsSafe(t *testing.T) {
 	e.deleteWord()
 	if len(e.line) != 0 {
 		t.Errorf("line = %q, want it still empty", string(e.line))
+	}
+}
+
+// Tab accepts the highlighted completion. It used to step through the list
+// instead, which duplicated the arrow keys and made the ordinary case -- one
+// obvious match -- cost two keypresses.
+func TestTabAcceptsTheHighlightedCompletion(t *testing.T) {
+	e := newTestEditor("@re", 3)
+	e.out = io.Discard
+	e.suggestions = []Completion{{Text: "README.md"}, {Text: "release.sh"}}
+
+	if !e.handleCompletionKey(Key{Name: KeyTab}) {
+		t.Fatal("tab was not consumed by the open list")
+	}
+	if got := string(e.line); got != "@README.md" {
+		t.Errorf("line = %q, want %q", got, "@README.md")
+	}
+	if e.suggestions != nil {
+		t.Error("the list stayed open after accepting")
+	}
+}
+
+// Tab and Enter agree, so whichever the hand reaches for does the same thing.
+func TestTabAndEnterAcceptAlike(t *testing.T) {
+	lineAfter := func(key Key) string {
+		e := newTestEditor("@re", 3)
+		e.out = io.Discard
+		e.suggestions = []Completion{{Text: "README.md"}}
+		e.handleCompletionKey(key)
+		return string(e.line)
+	}
+	if tab, enter := lineAfter(Key{Name: KeyTab}), lineAfter(Key{Name: KeyEnter}); tab != enter {
+		t.Errorf("tab gave %q, enter gave %q", tab, enter)
+	}
+}
+
+// The arrow keys are what moves through the list.
+func TestArrowsMoveTheSelection(t *testing.T) {
+	e := newTestEditor("@re", 3)
+	e.out = io.Discard
+	e.suggestions = []Completion{{Text: "README.md"}, {Text: "release.sh"}}
+
+	e.handleCompletionKey(Key{Name: KeyDown})
+	if e.selected != 1 {
+		t.Fatalf("down left the selection at %d, want 1", e.selected)
+	}
+	e.handleCompletionKey(Key{Name: KeyTab})
+	if got := string(e.line); got != "@release.sh" {
+		t.Errorf("line = %q, want %q", got, "@release.sh")
+	}
+}
+
+// Tab on a line that already reads like the selection closes the list rather
+// than falling through to the binding that would reopen it.
+func TestTabOnAnExactMatchClosesTheList(t *testing.T) {
+	e := newTestEditor("@README.md", 10)
+	e.out = io.Discard
+	e.suggestions = []Completion{{Text: "README.md"}}
+
+	if !e.handleCompletionKey(Key{Name: KeyTab}) {
+		t.Fatal("tab fell through; the outer binding would reopen the list")
+	}
+	if e.suggestions != nil {
+		t.Error("the list stayed open")
+	}
+	if got := string(e.line); got != "@README.md" {
+		t.Errorf("line = %q, want it unchanged", got)
+	}
+}
+
+// Enter on an exact match still falls through, because outside a list Enter
+// means submit and that is what the user is asking for.
+func TestEnterOnAnExactMatchFallsThrough(t *testing.T) {
+	e := newTestEditor("@README.md", 10)
+	e.out = io.Discard
+	e.suggestions = []Completion{{Text: "README.md"}}
+
+	if e.handleCompletionKey(Key{Name: KeyEnter}) {
+		t.Fatal("enter was swallowed; the line would never submit")
 	}
 }

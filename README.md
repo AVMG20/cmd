@@ -112,8 +112,8 @@ Run `cmd` with no request.
 |---|---|
 | `@name` | Complete a file path from the current directory. Matches anywhere in the path, so `@users` finds `src/models/users.go`. |
 | `/` | Command palette, with descriptions. |
-| `tab` | Open or cycle completions. |
-| `up` / `down` | Previous requests, kept in `~/.cmd-history`. |
+| `tab` / `enter` | Accept the highlighted completion. |
+| `up` / `down` | Move through completions; with none open, previous requests, kept in `~/.cmd-history`. |
 | `e` at the prompt | Edit the generated command before running it. |
 | `ctrl-w` / `ctrl-u` | Delete the last word / the line. |
 | `ctrl-d` | Leave. |
