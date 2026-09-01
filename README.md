@@ -120,9 +120,7 @@ Run `cmd` with no request.
 
 | Command | |
 |---|---|
-| `/config` | The setup wizard, without leaving the session. |
-| `/provider <name>` | Switch backend for this session. |
-| `/model <name>` | Switch model for this session. |
+| `/config` | The setup wizard, without leaving the session. Backend and model are chosen here. |
 | `/think` | Toggle reasoning. |
 | `/copy` | Toggle copying instead of running. |
 | `/help` | Everything above. |

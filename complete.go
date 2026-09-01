@@ -173,20 +173,18 @@ func isVendorDir(name string) bool {
 	return false
 }
 
-// slashCommand is one thing typeable at the "/" palette.
+// slashCommand is one thing typeable at the "/" palette. Every command is a
+// bare word: anything needing an argument belongs in /config, where the wizard
+// can show what the choices are.
 type slashCommand struct {
 	name    string
 	summary string
-	// arg describes what follows the name, empty when it takes none.
-	arg string
 }
 
 // slashCommands is the palette. Keeping it a plain list means /help and the
 // completion popup can never disagree about what exists.
 var slashCommands = []slashCommand{
 	{name: "/config", summary: "Change backend, model or API key"},
-	{name: "/provider", summary: "Switch backend for this session", arg: "<name>"},
-	{name: "/model", summary: "Switch model for this session", arg: "<name>"},
 	{name: "/think", summary: "Toggle reasoning before answering"},
 	{name: "/copy", summary: "Toggle copying instead of running"},
 	{name: "/help", summary: "Show what this understands"},
@@ -201,11 +199,7 @@ func CompleteSlash(prefix string) []Completion {
 		if !strings.HasPrefix(c.name, prefix) {
 			continue
 		}
-		text := c.name
-		if c.arg != "" {
-			text += " "
-		}
-		out = append(out, Completion{Text: text, Hint: c.summary})
+		out = append(out, Completion{Text: c.name, Hint: c.summary})
 	}
 	return out
 }

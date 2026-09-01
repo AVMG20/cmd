@@ -338,9 +338,10 @@ func (e *Editor) recallNext() {
 // Raw mode does no newline translation, so every line break is an explicit
 // carriage return plus line feed.
 func (e *Editor) render() {
-	if e.drawnLines > 1 {
-		fmt.Fprintf(e.out, "\033[%dA", e.drawnLines-1)
-	}
+	// Every render both starts and ends with the cursor on the input line, so
+	// there is nothing to walk up here: clearing from this point down removes
+	// the old input line and whatever list was drawn under it. Moving up first
+	// would eat the lines above the prompt, which is not this editor's screen.
 	fmt.Fprint(e.out, "\r\033[J")
 
 	visible, cursorCol := e.window()
@@ -348,18 +349,18 @@ func (e *Editor) render() {
 
 	lines := 1
 	for i, s := range e.suggestions {
-		text := s.Text
-		if s.Hint != "" {
-			text += "  " + e.p.Dim(s.Hint)
-		}
+		marker, body := "  ", s.Text
 		if i == e.selected {
-			fmt.Fprintf(e.out, "\r\n%s%s", e.p.Cyan("❯ "), e.p.Cyan(s.Text))
-			if s.Hint != "" {
-				fmt.Fprintf(e.out, "  %s", e.p.Dim(s.Hint))
-			}
-		} else {
-			fmt.Fprintf(e.out, "\r\n  %s", text)
+			marker = e.p.Cyan("❯ ")
+			body = e.p.Cyan(s.Text)
 		}
+		if s.Hint != "" {
+			body += "  " + e.p.Dim(s.Hint)
+		}
+		// A row wider than the terminal wraps, and a wrapped row makes the
+		// line count below wrong -- which is what turns a repaint into a
+		// scribble further up the screen.
+		fmt.Fprintf(e.out, "\r\n%s%s", marker, e.truncate(body, e.width-2))
 		lines++
 	}
 	e.drawnLines = lines
@@ -406,6 +407,38 @@ func (e *Editor) finish() {
 	e.render()
 	fmt.Fprint(e.out, "\r\n")
 	e.drawnLines = 0
+}
+
+// truncate cuts a decorated string to a column budget, leaving any ANSI
+// escapes it passes through intact so the row cannot wrap.
+func (e *Editor) truncate(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	if visibleWidth(s) <= max {
+		return s
+	}
+	var b strings.Builder
+	width, inEscape := 0, false
+	for _, r := range s {
+		switch {
+		case r == '\033':
+			inEscape = true
+			b.WriteRune(r)
+		case inEscape:
+			b.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+		default:
+			if width >= max {
+				continue
+			}
+			b.WriteRune(r)
+			width++
+		}
+	}
+	return b.String()
 }
 
 // visibleWidth counts printable columns, ignoring ANSI escapes, so the cursor

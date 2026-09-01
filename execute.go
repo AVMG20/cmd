@@ -34,6 +34,10 @@ func ttyPath() string {
 	return "/dev/tty"
 }
 
+// abortExit is the exit status for a command the user declined. It is distinct
+// from 1 so a script can tell "you said no" apart from "it went wrong".
+const abortExit = 2
+
 // Action is what the user chose to do with a generated command.
 type Action int
 

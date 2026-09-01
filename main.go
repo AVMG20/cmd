@@ -225,7 +225,7 @@ func run() int {
 			return reportCopy(os.Stderr, cmdText, p)
 		case ActionAbort:
 			fmt.Fprintln(os.Stderr, p.Dim("Aborted."))
-			return 2
+			return abortExit
 		}
 	}
 

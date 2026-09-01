@@ -121,6 +121,11 @@ func (s *session) handle(request string, editor *Editor) (int, bool) {
 
 // offer shows a command and acts on the answer, looping while the user keeps
 // editing it.
+//
+// Every answer that is a decision -- run, copy, cancel -- ends the session.
+// One request is the whole job, and a cancel is an answer to it, not a step
+// back into the prompt: the user who wants a different command reaches for
+// cmd again, which is cheaper than a harness that lingers.
 func (s *session) offer(cmdText string, editor *Editor) (int, bool) {
 	for {
 		fmt.Fprintf(s.out, "\n%s%s\n", s.p.Yellow("> "), cmdText)
@@ -131,19 +136,25 @@ func (s *session) offer(cmdText string, editor *Editor) (int, bool) {
 		}
 		risks := Risks(cmdText, s.cfg.DangerousPatterns)
 
-		switch ConfirmInteractive(s.out, s.term, s.p, risks, s.copyMode) {
-		case ActionEdit:
+		action := ConfirmInteractive(s.out, s.term, s.p, risks, s.copyMode)
+		if action == ActionEdit {
 			edited, ok := s.editCommand(cmdText, editor)
-			if !ok || strings.TrimSpace(edited) == "" {
-				return 2, false
+			if ok && strings.TrimSpace(edited) != "" {
+				cmdText = edited
+				continue
 			}
-			cmdText = edited
-			continue
+			// Abandoning the edit abandons the command with it: an edit is a
+			// step towards an answer, so giving up on one is the same answer
+			// as cancelling outright.
+			action = ActionAbort
+		}
+
+		switch action {
 		case ActionCopy:
 			return reportCopy(s.out, cmdText, s.p), true
 		case ActionAbort:
 			fmt.Fprintln(s.out, s.p.Dim("Aborted."))
-			return 2, false
+			return abortExit, true
 		}
 
 		// The command inherits this terminal, so it needs a normal one. The
@@ -200,8 +211,7 @@ func (s *session) banner() {
 
 // runSlash executes a palette command. It reports whether to leave.
 func (s *session) runSlash(line string) bool {
-	fields := strings.Fields(line)
-	name, args := fields[0], fields[1:]
+	name := strings.Fields(line)[0]
 
 	switch name {
 	case "/exit", "/quit":
@@ -219,26 +229,6 @@ func (s *session) runSlash(line string) bool {
 		s.copyMode = !s.copyMode
 		s.report("copy instead of run", onOff(s.copyMode))
 
-	case "/provider":
-		if len(args) == 0 {
-			s.report("provider", s.cfg.Provider)
-			break
-		}
-		if !validProviders[args[0]] {
-			s.warn(fmt.Sprintf("unknown provider %q (claude, antigravity, openrouter)", args[0]))
-			break
-		}
-		s.cfg.Provider = args[0]
-		s.report("provider", s.cfg.Provider+" · "+s.cfg.ActiveModel())
-
-	case "/model":
-		if len(args) == 0 {
-			s.report("model", s.cfg.ActiveModel())
-			break
-		}
-		s.cfg = s.cfg.withModelOverride(args[0])
-		s.report("model", s.cfg.ActiveModel())
-
 	case "/config":
 		// The wizard reads through this same terminal rather than switching
 		// modes, because giving raw mode up and taking it back would cost a
@@ -247,6 +237,10 @@ func (s *session) runSlash(line string) bool {
 		if cfg, err := LoadConfig(); err == nil {
 			s.cfg = cfg
 		}
+		// The banner named the backend and model, and it has scrolled away by
+		// now. Saying what is in force again is what makes /config the only
+		// place either of them is chosen.
+		s.report("now using", s.cfg.Provider+" · "+s.cfg.ActiveModel())
 
 	default:
 		s.warn(fmt.Sprintf("unknown command %q; /help lists them", name))
@@ -257,11 +251,7 @@ func (s *session) runSlash(line string) bool {
 func (s *session) printHelp() {
 	fmt.Fprintf(s.out, "\n%s\n", s.p.Yellow("Commands"))
 	for _, c := range slashCommands {
-		label := c.name
-		if c.arg != "" {
-			label += " " + c.arg
-		}
-		fmt.Fprintf(s.out, "  %-20s %s\n", label, s.p.Dim(c.summary))
+		fmt.Fprintf(s.out, "  %-20s %s\n", c.name, s.p.Dim(c.summary))
 	}
 	fmt.Fprintf(s.out, "\n%s\n", s.p.Yellow("Editing"))
 	for _, l := range [][2]string{
