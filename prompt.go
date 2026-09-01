@@ -27,10 +27,15 @@ CORRECTNESS RULES:
 INPUT DATA RULES:
 - When an Input section is present, it describes the data the request is about. Shape the command to that exact structure: real keys, real column positions, real delimiters. Never guess field names that are not shown.
 - The Input section may be a full sample or an inferred structure summary of a much larger file. Either way it describes the whole input, so the command must work for every record, not just the ones shown.
-- If the request names a file or path, the command MUST operate on that path by name, for example: jq -r '.[].title' todo.json
-  The Input section is then only there to tell you the structure.
-- If the request names no file, the command MUST read from stdin, for example: jq -r '.[].title'
-  Do not invent a filename in that case.
+- A "File:" heading gives the real path of a file on disk. The command MUST operate on that path by name, exactly as written, for example: jq -r '.[].title' todo.json
+  Never replace a given path with a placeholder, and never make such a command read stdin instead.
+- When several files are given, use each one where the request calls for it.
+- "Piped input" is data arriving on stdin with no path. A command using it MUST read stdin, for example: jq -r '.[].title'. Do not invent a filename in that case.
+- With no Input section at all, assume nothing about file contents and write the command the request asks for.
+
+MUTATION RULES:
+- When the request edits a file in place, prefer a form that cannot destroy the original if it goes wrong: sed -i.bak on BSD, sed -i.bak on GNU too when a backup is cheap, or write to a temporary file and move it into place.
+- Never redirect a command's output into the same file it is reading; the shell truncates it first. Write to a temporary file and mv it over the original.
 
 SAFETY RULES:
 - Choose the least destructive command that satisfies the request. Prefer a dry run or a listing when the request is ambiguous about deletion.
@@ -42,7 +47,7 @@ IF IMPOSSIBLE:
 
 // buildUserMessage assembles the single user turn sent to the model: the
 // environment, the request, and (optionally) a description of piped input.
-func buildUserMessage(query string, s Sample) string {
+func buildUserMessage(query string, s Sample, files []FileInput) string {
 	var b strings.Builder
 	b.WriteString("Environment:\n")
 	fmt.Fprintf(&b, "- OS: %s\n", describeOS())
@@ -55,24 +60,43 @@ func buildUserMessage(query string, s Sample) string {
 	b.WriteString(query)
 	b.WriteString("\n")
 
+	for _, f := range files {
+		b.WriteString("\nInput:\n")
+		fmt.Fprintf(&b, "File: %s\n", f.Path)
+		if f.Sample.Empty() {
+			b.WriteString("(contents unavailable; use the path as given)\n")
+			continue
+		}
+		b.WriteString(describeSample(f.Sample))
+	}
+
 	if !s.Empty() {
 		b.WriteString("\nInput:\n")
-		if s.Verbatim {
-			b.WriteString("Complete data the request refers to:\n<<<INPUT\n")
-			b.WriteString(s.Summary)
-			if !strings.HasSuffix(s.Summary, "\n") {
-				b.WriteString("\n")
-			}
-			b.WriteString("INPUT\n")
-		} else {
-			// Only a bounded prefix of a large input was ever read, so what
-			// follows is a description rather than the data itself.
-			b.WriteString(s.Summary)
-			if !strings.HasSuffix(s.Summary, "\n") {
-				b.WriteString("\n")
-			}
-			b.WriteString("The command must handle the entire input, not only the part described above.\n")
+		b.WriteString("Piped input on stdin (no path available).\n")
+		b.WriteString(describeSample(s))
+	}
+	return b.String()
+}
+
+// describeSample renders a sample as either the data itself or a description
+// of its shape, and says which it is.
+func describeSample(s Sample) string {
+	var b strings.Builder
+	if s.Verbatim {
+		b.WriteString("Complete contents:\n<<<INPUT\n")
+		b.WriteString(s.Summary)
+		if !strings.HasSuffix(s.Summary, "\n") {
+			b.WriteString("\n")
 		}
+		b.WriteString("INPUT\n")
+	} else {
+		// Only a bounded prefix of a large input was ever read, so what follows
+		// is a description rather than the data itself.
+		b.WriteString(s.Summary)
+		if !strings.HasSuffix(s.Summary, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("The command must handle the entire input, not only the part described above.\n")
 	}
 	return b.String()
 }

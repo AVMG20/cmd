@@ -12,31 +12,42 @@ import (
 	"time"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
-const usage = `cmd - turn plain English into shell commands, powered by your Claude subscription.
+const usage = `cmd - turn plain English into a shell command.
 
 Usage:
+  cmd                               Open the harness and type a request there
   cmd [flags] "what you want to do"
   <command producing data> | cmd [flags] "what to do with it"
 
 Flags:
+  -c, --copy           Copy the command to the clipboard instead of running it
+  -f, --file <path>    Include this file as context (repeatable)
   -t, --think          Let the model reason before answering (slower, better on hard requests)
-  -m, --model <name>   Model to use for this run (default: from config, "haiku")
+  -m, --model <name>   Model to use for this run
+  -p, --provider <p>   Backend for this run: claude, antigravity, openrouter
   -q, --quiet          Print only the command; never prompt, never execute
   -y, --yes            Skip the confirmation for commands that are not flagged as risky
-      --init           Write a default config to ~/.cmd-config.json
+      --configure      Interactive setup: pick a backend, a model and a key
       --config         Show the config file path and the settings in force
-      --debug          Print the underlying claude invocation to stderr
+      --debug          Print the underlying request to stderr
   -h, --help           Show this help
   -v, --version        Show version
 
+At the confirmation prompt a single keypress decides: y runs, c copies, anything
+else cancels. Risky commands still need the word "yes" typed out.
+
+Run cmd with no request to open the harness: @ completes file paths from the
+current directory, / opens the command palette, up and down recall past
+requests, and e at the prompt edits the command before running it.
+
 Examples:
   cmd "show the 10 biggest files in this folder"
-  cmd "find TODO comments in src, with line numbers"
+  cmd "list all titles in todo.json"          # reads todo.json to get the keys right
+  cmd "strip the email column from users.csv" # names the file, so it can be edited in place
   cmd "what's using port 3000"
-  cat package.json | cmd "list the dependency names"
-  cat users.json | cmd "emails of everyone who is active"
+  cat access.log | cmd "count requests per status code"
 
 Exit codes: 0 success, 1 error, 2 aborted by user.
 `
@@ -47,14 +58,17 @@ func main() {
 
 func run() int {
 	var (
-		think    bool
-		quiet    bool
-		yes      bool
-		initCfg  bool
-		showCfg  bool
-		debug    bool
-		showVer  bool
-		modelOvr string
+		think       bool
+		quiet       bool
+		yes         bool
+		copyOnly    bool
+		configure   bool
+		showCfg     bool
+		debug       bool
+		showVer     bool
+		modelOvr    string
+		providerOvr string
+		fileArgs    repeatedFlag
 	)
 
 	fs := flag.NewFlagSet("cmd", flag.ContinueOnError)
@@ -62,12 +76,17 @@ func run() int {
 	boolVar(fs, &think, "think", "t", false)
 	boolVar(fs, &quiet, "quiet", "q", false)
 	boolVar(fs, &yes, "yes", "y", false)
+	boolVar(fs, &copyOnly, "copy", "c", false)
 	boolVar(fs, &showVer, "version", "v", false)
-	fs.BoolVar(&initCfg, "init", false, "")
+	fs.BoolVar(&configure, "configure", false, "")
 	fs.BoolVar(&showCfg, "config", false, "")
 	fs.BoolVar(&debug, "debug", false, "")
 	fs.StringVar(&modelOvr, "model", "", "")
 	fs.StringVar(&modelOvr, "m", "", "")
+	fs.StringVar(&providerOvr, "provider", "", "")
+	fs.StringVar(&providerOvr, "p", "", "")
+	fs.Var(&fileArgs, "file", "")
+	fs.Var(&fileArgs, "f", "")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n\n%s", err, usage)
@@ -78,18 +97,10 @@ func run() int {
 		fmt.Println("cmd " + version)
 		return 0
 	}
-	if initCfg {
-		path, written, err := WriteDefaultConfig()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not write config: %v\n", err)
-			return 1
-		}
-		if written {
-			fmt.Fprintf(os.Stderr, "Wrote default config to %s\n", path)
-		} else {
-			fmt.Fprintf(os.Stderr, "Config already exists at %s (left untouched)\n", path)
-		}
-		return 0
+	if configure {
+		in, cleanup := promptSource()
+		defer cleanup()
+		return Configure(os.Stderr, in, palette{enabled: colorsEnabled()})
 	}
 
 	if showCfg {
@@ -98,19 +109,20 @@ func run() int {
 	}
 
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if query == "" {
-		fmt.Fprint(os.Stderr, usage)
-		return 1
-	}
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		// A broken config is a warning, not a fatal error: defaults still work.
 		fmt.Fprintf(os.Stderr, "Warning: %v (using defaults)\n", err)
 	}
-	if modelOvr != "" {
-		cfg.Model = modelOvr
+	if providerOvr != "" {
+		if !validProviders[providerOvr] {
+			fmt.Fprintf(os.Stderr, "Unknown provider %q (expected claude, antigravity or openrouter)\n", providerOvr)
+			return 1
+		}
+		cfg.Provider = providerOvr
 	}
+	cfg = cfg.withModelOverride(modelOvr)
 	if think {
 		cfg.EnableThink = true
 	}
@@ -123,15 +135,37 @@ func run() int {
 
 	p := palette{enabled: colorsEnabled() && !quiet}
 
-	sample := readPipedInput(os.Stdin, cfg.SampleReadBytes, cfg.MaxPipeChars)
-	userMessage := buildUserMessage(query, sample)
-
-	if debug {
-		args := buildArgs(cfg, "<user message omitted>", cfg.EnableThink)
-		fmt.Fprintf(os.Stderr, "%s %s\n\n", p.Dim("claude"), p.Dim(strings.Join(args, " ")))
+	// No request on the command line: open the harness, where the request can
+	// be typed with file completion instead of fought through shell quoting.
+	// Without a terminal there is nothing to open, so the usage text stands in.
+	if query == "" {
+		if quiet || !isTerminal(os.Stdin) {
+			fmt.Fprint(os.Stderr, usage)
+			return 1
+		}
+		return Interactive(cfg, p)
 	}
 
-	cmdText, err := generateCommand(cfg, userMessage, quiet, p)
+	// A redirect (`cmd "..." < users.csv`) carries a real path even though it
+	// arrives on stdin, so prefer naming the file over describing a stream:
+	// the command can then target it, and stays re-runnable. It goes through
+	// the same collector as -f so that naming the file in the request as well
+	// does not send it twice.
+	var sample Sample
+	named := append([]string(nil), fileArgs...)
+	if path, ok := StdinPath(os.Stdin); ok && cfg.ReadsFiles() {
+		named = append(named, path)
+	} else {
+		sample = readPipedInput(os.Stdin, cfg.SampleReadBytes, cfg.MaxPipeChars)
+	}
+	files := CollectFiles(query, named, cfg)
+	userMessage := buildUserMessage(query, sample, files)
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "%s\n", p.Dim(describeRequest(cfg, files)))
+	}
+
+	cmdText, err := generateCommand(os.Stderr, cfg, userMessage, quiet, p)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", p.Red("Error:"), err)
 		return 1
@@ -158,6 +192,12 @@ func run() int {
 	}
 	fmt.Fprintln(os.Stdout)
 
+	// -c is an explicit instruction, so it is honoured even when output is
+	// redirected: the command still goes to stdout, and a copy is still made.
+	if copyOnly {
+		return reportCopy(os.Stderr, cmdText, p)
+	}
+
 	if quiet {
 		return 0
 	}
@@ -180,7 +220,10 @@ func run() int {
 	defer cleanup()
 
 	if !yes || len(risks) > 0 {
-		if !Confirm(os.Stderr, in, p, risks) {
+		switch Confirm(os.Stderr, in, p, risks) {
+		case ActionCopy:
+			return reportCopy(os.Stderr, cmdText, p)
+		case ActionAbort:
 			fmt.Fprintln(os.Stderr, p.Dim("Aborted."))
 			return 2
 		}
@@ -193,6 +236,43 @@ func run() int {
 		return 1
 	}
 	return code
+}
+
+// reportCopy puts the command on the clipboard and says where it went.
+func reportCopy(out io.Writer, cmdText string, p palette) int {
+	via, err := Copy(cmdText)
+	if err != nil {
+		fmt.Fprintf(out, "%s could not copy: %v\n", p.Red("Error:"), err)
+		return 1
+	}
+	fmt.Fprintf(out, "%s copied to the clipboard %s\n", p.Green("✓"), p.Dim("("+via+")"))
+	return 0
+}
+
+// describeRequest summarises what is about to be sent, for --debug.
+func describeRequest(cfg Config, files []FileInput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "provider=%s model=%s think=%t", cfg.Provider, cfg.ActiveModel(), cfg.EnableThink)
+	if cfg.Provider == ProviderClaude {
+		fmt.Fprintf(&b, "\nclaude %s", strings.Join(buildArgs(cfg, "<user message omitted>", cfg.EnableThink), " "))
+	}
+	if cfg.Provider == ProviderAgy {
+		fmt.Fprintf(&b, "\n%s %s", cfg.AgyPath, strings.Join(buildAgyArgs(cfg, "<user message omitted>", cfg.EnableThink), " "))
+	}
+	for _, f := range files {
+		fmt.Fprintf(&b, "\nfile: %s (%s, %d bytes read)", f.Path, f.Sample.Format, f.Sample.BytesRead)
+	}
+	return b.String()
+}
+
+// repeatedFlag collects a string flag that may be given more than once.
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, ", ") }
+
+func (r *repeatedFlag) Set(v string) error {
+	*r = append(*r, v)
+	return nil
 }
 
 // printEffectiveConfig reports where the config was read from and what values
@@ -215,8 +295,13 @@ func printEffectiveConfig(w io.Writer) {
 
 	fmt.Fprintf(w, "config file:  %s\n", path)
 	fmt.Fprintf(w, "in use:       %s\n\n", source)
-	fmt.Fprintf(w, "model             %s\n", cfg.Model)
+	fmt.Fprintf(w, "provider          %s\n", cfg.Provider)
+	fmt.Fprintf(w, "model             %s (for this provider)\n", cfg.ActiveModel())
 	fmt.Fprintf(w, "claude_path       %s\n", cfg.ClaudePath)
+	fmt.Fprintf(w, "agy_path          %s\n", cfg.AgyPath)
+	fmt.Fprintf(w, "openrouter key    %s\n", describeKey(cfg))
+	fmt.Fprintf(w, "auto_read_files   %t\n", cfg.ReadsFiles())
+	fmt.Fprintf(w, "max_auto_files    %d\n", cfg.MaxAutoFiles)
 	fmt.Fprintf(w, "max_pipe_chars    %d (sent to the model)\n", cfg.MaxPipeChars)
 	fmt.Fprintf(w, "sample_read_bytes %d (max ever read from stdin)\n", cfg.SampleReadBytes)
 	fmt.Fprintf(w, "enable_think      %t\n", cfg.EnableThink)
@@ -226,13 +311,28 @@ func printEffectiveConfig(w io.Writer) {
 	fmt.Fprintf(w, "dangerous_patterns %d custom\n", len(cfg.DangerousPatterns))
 }
 
+// describeKey says whether a key is available and where it came from, without
+// printing it.
+func describeKey(cfg Config) string {
+	if os.Getenv("OPENROUTER_API_KEY") != "" {
+		return masked(os.Getenv("OPENROUTER_API_KEY")) + " (from OPENROUTER_API_KEY)"
+	}
+	if cfg.OpenRouterAPIKey != "" {
+		return masked(cfg.OpenRouterAPIKey) + " (from the config file)"
+	}
+	return "not set"
+}
+
 // generateCommand streams a response from Claude, showing a live single-line
 // preview on stderr, and returns the sanitized command.
-func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (string, error) {
+func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, p palette) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
 
 	interactive := !quiet && isTerminal(os.Stderr)
+	// Backends that answer in one shot have nothing to preview, so the spinner
+	// carries the whole wait.
+	streaming := Streams(cfg.Provider)
 
 	// Reasoning is only ever displayed when it was explicitly asked for. The
 	// model may emit thinking blocks even at low effort, so gating on
@@ -243,11 +343,11 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	// "Loading" until the model actually says something: until the first event
 	// arrives we are waiting on the request, not on any reasoning. The label
 	// switches to "Thinking" only once a reasoning block really starts.
-	spinner := NewSpinner(os.Stderr, interactive)
+	spinner := NewSpinner(out, interactive)
 	spinner.Start("Loading")
 
 	var (
-		out          bytes.Buffer
+		answer       bytes.Buffer
 		streamErr    string
 		startedText  bool
 		startedThink bool
@@ -264,28 +364,28 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 			}
 			if !startedThink {
 				spinner.Stop()
-				fmt.Fprintf(os.Stderr, "%s\n%s", p.Dim("reasoning:"), p.dimOn())
+				fmt.Fprintf(out, "%s\n%s", p.Dim("reasoning:"), p.dimOn())
 				startedThink = true
 			}
 			// Written raw: the dim attribute is opened once above and closed
 			// when the block ends.
-			fmt.Fprint(os.Stderr, ev.Text)
+			fmt.Fprint(out, ev.Text)
 
 		case EventText:
-			out.WriteString(ev.Text)
-			if !interactive {
+			answer.WriteString(ev.Text)
+			if !interactive || !streaming {
 				return
 			}
 			if !startedText {
 				spinner.Stop()
 				if startedThink {
-					fmt.Fprintln(os.Stderr, p.reset())
+					fmt.Fprintln(out, p.reset())
 				}
 				startedText = true
 			}
 			// Live preview: rewrite one line so the final, sanitized command
 			// can replace it cleanly without leaving duplicated output.
-			fmt.Fprintf(os.Stderr, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(out.String())))
+			fmt.Fprintf(out, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(answer.String())))
 
 		case EventError:
 			streamErr = ev.Text
@@ -295,12 +395,12 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	genErr := Generate(ctx, cfg, userMessage, cfg.EnableThink, emit)
 	spinner.Stop()
 	if interactive && startedText {
-		fmt.Fprint(os.Stderr, "\r\033[K") // erase the preview
+		fmt.Fprint(out, "\r\033[K") // erase the preview
 	}
 	if interactive && startedThink && !startedText {
 		// Reasoning ran but no command followed; close the dim attribute so it
 		// does not bleed into the shell prompt.
-		fmt.Fprintln(os.Stderr, p.reset())
+		fmt.Fprintln(out, p.reset())
 	}
 
 	if genErr != nil {
@@ -309,7 +409,7 @@ func generateCommand(cfg Config, userMessage string, quiet bool, p palette) (str
 	if streamErr != "" {
 		return "", errorFromClaude(streamErr)
 	}
-	return Sanitize(out.String()), nil
+	return Sanitize(answer.String()), nil
 }
 
 // previewLine renders the tail of the streamed text on a single line.
@@ -344,9 +444,11 @@ func readPipedInput(stdin *os.File, readCap, sendCap int) Sample {
 	return BuildSample(stdin, readCap, sendCap)
 }
 
-// fileArg matches an unquoted argument that names a file: either it contains a
-// path separator, or it ends in a short extension.
-var fileArg = regexp.MustCompile(`/|\.[A-Za-z0-9]{1,6}$`)
+// fileArg matches an argument that names a file: either it contains a path
+// separator, or it ends in an extension. The extension bound is generous
+// enough for the likes of .sqlite3 and .markdown; over-matching is cheap,
+// because every caller confirms the file exists before acting on it.
+var fileArg = regexp.MustCompile(`/|\.[A-Za-z0-9]{1,8}$`)
 
 func looksLikePath(s string) bool { return fileArg.MatchString(s) }
 

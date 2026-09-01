@@ -34,6 +34,32 @@ func isTerminal(f *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
+// crlfWriter turns a bare newline into a carriage return plus newline.
+//
+// A terminal in raw mode does no such translation itself, so text written with
+// ordinary "\n" staircases down the screen. Wrapping the output once means the
+// rest of the program can keep writing "\n" and stay unaware of the mode it is
+// running in.
+type crlfWriter struct{ w io.Writer }
+
+func (c crlfWriter) Write(p []byte) (int, error) {
+	out := make([]byte, 0, len(p)+8)
+	var prev byte
+	for _, b := range p {
+		if b == '\n' && prev != '\r' {
+			out = append(out, '\r')
+		}
+		out = append(out, b)
+		prev = b
+	}
+	if _, err := c.w.Write(out); err != nil {
+		return 0, err
+	}
+	// Report the caller's own length: the added bytes are an encoding detail,
+	// and a short write would look like an error to anything checking.
+	return len(p), nil
+}
+
 type palette struct {
 	enabled bool
 }

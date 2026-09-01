@@ -203,13 +203,13 @@ func ParseStream(r io.Reader, emit func(Event)) error {
 	return nil
 }
 
-// Generate runs the claude CLI and streams decoded events to emit.
+// generateClaude runs the claude CLI and streams decoded events to emit.
 //
 // The child's stdin is wired to an empty reader so it sees EOF immediately.
 // Without this the CLI waits several seconds for stdin data, which would add a
 // fixed delay to every invocation of this tool (our own stdin has already been
 // consumed as context).
-func Generate(ctx context.Context, cfg Config, userMessage string, think bool, emit func(Event)) error {
+func generateClaude(ctx context.Context, cfg Config, userMessage string, think bool, emit func(Event)) error {
 	bin, err := exec.LookPath(cfg.ClaudePath)
 	if err != nil {
 		return fmt.Errorf("claude CLI not found (%q): install Claude Code, or set \"claude_path\" in your config", cfg.ClaudePath)
