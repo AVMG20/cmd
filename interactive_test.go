@@ -161,3 +161,15 @@ func TestOpenRouterLeavesRoomForReasoning(t *testing.T) {
 		t.Errorf("max_tokens = %d, too tight to survive a reasoning model", req.MaxTokens)
 	}
 }
+
+func TestParseRefsLeavesEmailsAndSSHTargetsAlone(t *testing.T) {
+	// "@" only marks a file at the start of a word; inside one it is an
+	// address and stripping it would corrupt the request.
+	query, files := parseRefs("scp @notes.txt deploy@web1:/srv and mail me@example.com")
+	if query != "scp notes.txt deploy@web1:/srv and mail me@example.com" {
+		t.Errorf("query = %q", query)
+	}
+	if !reflect.DeepEqual(files, []string{"notes.txt"}) {
+		t.Errorf("files = %v, want [notes.txt]", files)
+	}
+}

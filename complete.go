@@ -47,44 +47,53 @@ func CompleteFiles(root, prefix string) []Completion {
 	var dirs, files []scored
 	seen := 0
 	lower := strings.ToLower(needle)
+	// Hidden entries are noise until they are asked for by name: "@.env" and
+	// "@.github/" should find them, a bare "@" should not.
+	wantHidden := strings.HasPrefix(lower, ".")
 
-	_ = filepath.WalkDir(searchRoot, func(path string, d os.DirEntry, err error) error {
+	// Breadth first, so the walk limit trims the deepest entries rather than
+	// whichever top-level file happens to sort after a large subtree.
+	queue := []string{searchRoot}
+	for len(queue) > 0 && seen < fileWalkLimit {
+		dir := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return nil //nolint:nilerr // an unreadable directory is skipped, not fatal
+			continue // an unreadable directory is skipped, not fatal
 		}
-		if seen++; seen > fileWalkLimit {
-			return filepath.SkipAll
-		}
-		if path == searchRoot {
-			return nil
-		}
-		name := d.Name()
-		// Hidden files and the usual heavy directories are noise here. They
-		// stay reachable by typing the prefix explicitly.
-		if strings.HasPrefix(name, ".") || isVendorDir(name) {
-			if d.IsDir() {
-				return filepath.SkipDir
+		for _, d := range entries {
+			if seen++; seen > fileWalkLimit {
+				break
 			}
-			return nil
+			name := d.Name()
+			hidden := strings.HasPrefix(name, ".")
+			if (hidden && !wantHidden) || isVendorDir(name) {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			// A hidden directory may be offered but is never descended into;
+			// .git alone would exhaust the walk limit.
+			if d.IsDir() && !hidden {
+				queue = append(queue, path)
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				continue
+			}
+			rank, matched := matchRank(rel, name, lower)
+			if !matched {
+				continue
+			}
+			entry := scored{rank: rank, depth: strings.Count(rel, "/")}
+			if d.IsDir() {
+				entry.Completion = Completion{Text: rel + "/", Hint: "dir"}
+				dirs = append(dirs, entry)
+			} else {
+				entry.Completion = Completion{Text: rel}
+				files = append(files, entry)
+			}
 		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		rank, matched := matchRank(rel, name, lower)
-		if !matched {
-			return nil
-		}
-		entry := scored{rank: rank, depth: strings.Count(rel, "/")}
-		if d.IsDir() {
-			entry.Completion = Completion{Text: rel + "/", Hint: "dir"}
-			dirs = append(dirs, entry)
-		} else {
-			entry.Completion = Completion{Text: rel}
-			files = append(files, entry)
-		}
-		return nil
-	})
+	}
 
 	// Rank first, then depth: a name that starts with what was typed is what
 	// was meant, and a shallower path beats a nested namesake. Without this a

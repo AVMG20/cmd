@@ -132,21 +132,37 @@ func (r *rawTerminal) Restore() {
 // Width reports the terminal's column count, falling back to a conventional 80
 // when it cannot be determined.
 func (r *rawTerminal) Width() int {
-	const fallback = 80
 	if r == nil || r.tty == nil {
-		return fallback
+		return fallbackWidth
 	}
-	out, err := stty(r.tty, "size")
+	return widthOf(r.tty)
+}
+
+const fallbackWidth = 80
+
+// terminalWidth reports the controlling terminal's column count without
+// needing a raw terminal in hand.
+func terminalWidth() int {
+	tty, err := os.OpenFile(ttyPath(), os.O_RDONLY, 0)
 	if err != nil {
-		return fallback
+		return fallbackWidth
+	}
+	defer tty.Close()
+	return widthOf(tty)
+}
+
+func widthOf(tty *os.File) int {
+	out, err := stty(tty, "size")
+	if err != nil {
+		return fallbackWidth
 	}
 	fields := strings.Fields(out)
 	if len(fields) != 2 {
-		return fallback
+		return fallbackWidth
 	}
 	cols, err := strconv.Atoi(fields[1])
 	if err != nil || cols < minInputWidth {
-		return fallback
+		return fallbackWidth
 	}
 	return cols
 }
@@ -163,6 +179,11 @@ func stty(tty *os.File, args ...string) (string, error) {
 // one burst, so this only ever costs time on an actual Escape press.
 const escapeGrace = 40 * time.Millisecond
 
+// drainSettle is how long Drain waits for the pump to catch up. A terminal
+// that has only just been switched to raw mode may still have type-ahead in
+// the kernel's line buffer that the pump has not read yet.
+const drainSettle = 10 * time.Millisecond
+
 // Drain discards input that arrived before now.
 //
 // It is what keeps typing during a slow generation from answering the prompt
@@ -170,14 +191,41 @@ const escapeGrace = 40 * time.Millisecond
 // not been asked.
 func (r *rawTerminal) Drain() {
 	for {
-		select {
-		case _, ok := <-r.bytes:
-			if !ok {
-				return
-			}
-		default:
+		if _, ok := r.readByte(drainSettle); !ok {
 			return
 		}
+	}
+}
+
+// WatchInterrupt calls cancel if ctrl-c is pressed before stop is called.
+//
+// While the model is working nothing reads the terminal, and raw mode means
+// ctrl-c is a byte rather than a signal, so without this a slow request could
+// not be given up on. Other keys pressed meanwhile are discarded, as Drain
+// would discard them anyway.
+func (r *rawTerminal) WatchInterrupt(cancel func()) (stop func()) {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			case b, ok := <-r.bytes:
+				if !ok {
+					return
+				}
+				if b == 3 {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
 	}
 }
 

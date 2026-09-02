@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,8 +21,23 @@ import (
 // requestPrompt is the marker shown while a request is being typed.
 const requestPrompt = "› "
 
-// atRef matches an @-prefixed file reference in a request.
-var atRef = regexp.MustCompile(`@([^\s]+)`)
+// atRef matches an @-prefixed file reference in a request. The marker only
+// counts at the start of a word, so an email address or an ssh target such as
+// user@host:path is left alone.
+var atRef = regexp.MustCompile(`(^|\s)@(\S+)`)
+
+// harnessOptions carries the command-line flags that still mean something
+// once the harness is open.
+type harnessOptions struct {
+	// copyMode starts the session with /copy on (-c).
+	copyMode bool
+	// yes runs an unflagged command without asking (-y).
+	yes bool
+	// debug prints the request summary before each generation (--debug).
+	debug bool
+	// files are included as context with every request (-f).
+	files []string
+}
 
 // session is the mutable state of one interactive run.
 type session struct {
@@ -34,6 +51,9 @@ type session struct {
 	// copyMode makes an accepted command go to the clipboard rather than the
 	// shell, toggled with /copy.
 	copyMode bool
+	opts     harnessOptions
+	// ctx is cancelled when the process is told to stop.
+	ctx context.Context
 }
 
 // Interactive runs the harness and returns the process exit code.
@@ -44,7 +64,7 @@ type session struct {
 // raw mode down and building it back up between requests silently swallows a
 // keystroke every time. Output is wrapped instead, so the rest of the program
 // does not have to know which mode the terminal is in.
-func Interactive(cfg Config, p palette) int {
+func Interactive(ctx context.Context, cfg Config, p palette, opts harnessOptions) int {
 	term, ok := enterRaw()
 	if !ok {
 		fmt.Fprintf(os.Stderr, "%s this needs a terminal. Pass your request as an argument instead:\n  %s\n",
@@ -54,11 +74,14 @@ func Interactive(cfg Config, p palette) int {
 	defer term.Restore()
 
 	s := &session{
-		cfg:     cfg,
-		p:       p,
-		term:    term,
-		out:     crlfWriter{os.Stderr},
-		history: LoadHistory(),
+		cfg:      cfg,
+		p:        p,
+		term:     term,
+		out:      crlfWriter{os.Stderr},
+		history:  LoadHistory(),
+		copyMode: opts.copyMode,
+		opts:     opts,
+		ctx:      ctx,
 	}
 	s.banner()
 
@@ -98,11 +121,25 @@ func Interactive(cfg Config, p palette) int {
 // exit code and whether the session should end.
 func (s *session) handle(request string, editor *Editor) (int, bool) {
 	query, files := parseRefs(request)
+	files = append(append([]string(nil), s.opts.files...), files...)
 
 	collected := CollectFiles(query, files, s.cfg)
 	userMessage := buildUserMessage(query, Sample{}, collected)
+	if s.opts.debug {
+		fmt.Fprintf(s.out, "%s\n", s.p.Dim(describeRequest(s.cfg, collected)))
+	}
 
-	cmdText, err := generateCommand(s.out, s.cfg, userMessage, false, s.p)
+	// ctrl-c while waiting gives up on this request and returns to the prompt;
+	// the request is already in history, so up-arrow brings it back.
+	ctx, cancel := context.WithCancel(s.ctx)
+	stopWatch := s.term.WatchInterrupt(cancel)
+	cmdText, err := generateCommand(ctx, s.out, s.cfg, userMessage, false, s.p)
+	stopWatch()
+	cancel()
+	if errors.Is(err, errAborted) {
+		fmt.Fprintf(s.out, "%s\n", s.p.Dim("Aborted."))
+		return abortExit, s.ctx.Err() != nil
+	}
 	if err != nil {
 		fmt.Fprintf(s.out, "%s %v\n", s.p.Red("Error:"), err)
 		return 1, false
@@ -136,7 +173,13 @@ func (s *session) offer(cmdText string, editor *Editor) (int, bool) {
 		}
 		risks := Risks(cmdText, s.cfg.DangerousPatterns)
 
-		action := ConfirmInteractive(s.out, s.term, s.p, risks, s.copyMode)
+		action := ActionRun
+		if s.copyMode {
+			action = ActionCopy
+		}
+		if !s.opts.yes || len(risks) > 0 {
+			action = ConfirmInteractive(s.out, s.term, s.p, risks, s.copyMode)
+		}
 		if action == ActionEdit {
 			edited, ok := s.editCommand(cmdText, editor)
 			if ok && strings.TrimSpace(edited) != "" {
@@ -194,9 +237,10 @@ func (s *session) editCommand(cmdText string, editor *Editor) (string, bool) {
 // along as explicit files, which is the same route -f uses.
 func parseRefs(request string) (query string, files []string) {
 	query = atRef.ReplaceAllStringFunc(request, func(m string) string {
-		path := strings.TrimSuffix(m[1:], "/")
+		lead, ref, _ := strings.Cut(m, "@")
+		path := strings.TrimSuffix(ref, "/")
 		files = append(files, path)
-		return path
+		return lead + path
 	})
 	return strings.TrimSpace(query), files
 }
@@ -259,6 +303,7 @@ func (s *session) printHelp() {
 		{"tab / enter", "accept the highlighted completion"},
 		{"up / down", "move through completions, or previous requests"},
 		{"ctrl-w / ctrl-u", "delete the last word / the line"},
+		{"ctrl-c", "give up on a slow request; at the prompt, leave"},
 		{"ctrl-d", "leave"},
 	} {
 		fmt.Fprintf(s.out, "  %-20s %s\n", l[0], s.p.Dim(l[1]))

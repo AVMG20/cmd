@@ -4,3 +4,4 @@ cmd-ai
 *.test
 coverage.out
 .idea
+cmd-ai-go-tmp-umask

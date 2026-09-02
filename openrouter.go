@@ -87,6 +87,7 @@ type orChunk struct {
 			Content   string `json:"content"`
 			Reasoning string `json:"reasoning"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *orError `json:"error"`
 }
@@ -116,6 +117,7 @@ func ParseSSE(r io.Reader, emit func(Event)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
+	sawText := false
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		// Comments and blank separators carry no payload.
@@ -144,7 +146,15 @@ func ParseSSE(r io.Reader, emit func(Event)) error {
 				emit(Event{Kind: EventThinking, Text: c.Delta.Reasoning})
 			}
 			if c.Delta.Content != "" {
+				sawText = true
 				emit(Event{Kind: EventText, Text: c.Delta.Content})
+			}
+			// A model with reasoning it cannot switch off can spend the whole
+			// token budget before the command; say so instead of reporting an
+			// empty answer.
+			if c.FinishReason == "length" && !sawText {
+				emit(Event{Kind: EventError, Text: "the model hit the token limit before answering (its reasoning used the budget); try again, or pick another model with `cmd --configure`"})
+				return nil
 			}
 		}
 	}

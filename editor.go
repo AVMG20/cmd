@@ -170,7 +170,13 @@ func (e *Editor) handleCompletionKey(key Key) bool {
 			}
 			break
 		}
-		e.acceptCompletion()
+		marker := e.acceptCompletion()
+		// A slash command takes no arguments, so once one is chosen there is
+		// nothing left to type: Enter on it is also the Enter that sends it.
+		if marker == '/' && key.Name == KeyEnter {
+			e.suggestions = nil
+			return false
+		}
 	case KeyEsc:
 		e.suggestions = nil
 	default:
@@ -242,10 +248,11 @@ func (e *Editor) lineAndOffset() (string, int) {
 	return string(e.line), len(string(e.line[:e.cursor]))
 }
 
-// acceptCompletion replaces the token under the cursor with the selection.
-func (e *Editor) acceptCompletion() {
+// acceptCompletion replaces the token under the cursor with the selection. It
+// reports which marker the token carried, or zero if nothing was accepted.
+func (e *Editor) acceptCompletion() byte {
 	if e.selected >= len(e.suggestions) {
-		return
+		return 0
 	}
 	choice := e.suggestions[e.selected]
 	line, at := e.lineAndOffset()
@@ -257,7 +264,7 @@ func (e *Editor) acceptCompletion() {
 		start, _, ok = activeToken(line, at, '/')
 	}
 	if !ok {
-		return
+		return 0
 	}
 
 	// The marker is kept: it is what tells the request builder this word is a
@@ -273,9 +280,10 @@ func (e *Editor) acceptCompletion() {
 	// A directory is a step on the way somewhere, so its list stays open.
 	if strings.HasSuffix(choice.Text, "/") {
 		e.openCompletions()
-		return
+		return marker
 	}
 	e.suggestions = nil
+	return marker
 }
 
 func (e *Editor) insert(r rune) {
@@ -391,7 +399,7 @@ func (e *Editor) window() (string, int) {
 		avail = minInputWidth
 	}
 	if len(e.line) <= avail {
-		return string(e.line), promptWidth + e.cursor
+		return displayLine(e.line), promptWidth + e.cursor
 	}
 	// Keep the cursor in view, preferring to show what comes before it.
 	start := e.cursor - avail
@@ -402,7 +410,28 @@ func (e *Editor) window() (string, int) {
 	if end > len(e.line) {
 		end = len(e.line)
 	}
-	return string(e.line[start:end]), promptWidth + (e.cursor - start)
+	return displayLine(e.line[start:end]), promptWidth + (e.cursor - start)
+}
+
+// displayLine renders the line for the screen. The editor is single-line and
+// positions the cursor by counting runes, so a newline or tab in the text -- a
+// multi-line command handed over for editing -- is shown as one symbol of one
+// column instead of being sent to the terminal to move the cursor itself.
+func displayLine(line []rune) string {
+	out := make([]rune, len(line))
+	for i, r := range line {
+		switch {
+		case r == '\n':
+			out[i] = '⏎'
+		case r == '\t':
+			out[i] = '→'
+		case r < ' ' || r == 0x7f:
+			out[i] = '?'
+		default:
+			out[i] = r
+		}
+	}
+	return string(out)
 }
 
 // finish clears the completion list and leaves the cursor on a fresh line.

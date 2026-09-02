@@ -99,14 +99,36 @@ func TestPlaceholders(t *testing.T) {
 }
 
 func TestPreviewLine(t *testing.T) {
-	if got := previewLine("line one\nline two"); got != "line two" {
+	if got := previewLine("line one\nline two", 0); got != "line two" {
 		t.Errorf("previewLine = %q, want last line", got)
 	}
 	long := ""
 	for i := 0; i < 200; i++ {
 		long += "x"
 	}
-	if got := previewLine(long); len([]rune(got)) > 91 {
+	if got := previewLine(long, 0); len([]rune(got)) > 91 {
 		t.Errorf("previewLine did not truncate: len = %d", len([]rune(got)))
+	}
+}
+
+func TestSanitizeDropsProseAroundAFence(t *testing.T) {
+	in := "Here you go:\n```bash\nls -la\n```\nThis lists every file."
+	if got := Sanitize(in); got != "ls -la" {
+		t.Errorf("Sanitize = %q, want only the fenced command", got)
+	}
+}
+
+func TestPlaceholdersIgnoreRedirectPairs(t *testing.T) {
+	if got := Placeholders("sort <input.txt >output.txt"); got != nil {
+		t.Errorf("Placeholders = %v, want none", got)
+	}
+	if got := Placeholders("cp <your file> /tmp"); !reflect.DeepEqual(got, []string{"<your file>"}) {
+		t.Errorf("Placeholders = %v, want the spaced placeholder", got)
+	}
+}
+
+func TestPreviewLineHonoursWidth(t *testing.T) {
+	if got := previewLine("abcdefghijklmnopqrstuvwxyz0123456789", 25); len([]rune(got)) != 25 {
+		t.Errorf("previewLine = %q (%d runes), want 25", got, len([]rune(got)))
 	}
 }

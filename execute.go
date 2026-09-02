@@ -137,6 +137,9 @@ func confirm(out io.Writer, in io.Reader, p palette, risks []string, allowEdit, 
 
 	if term, ok := enterRaw(); ok {
 		defer term.Restore()
+		// Keys typed while the model was working were not an answer to this
+		// question; see ConfirmInteractive.
+		term.Drain()
 		key := term.ReadKey()
 		action := actionForKey(key, copyDefault)
 		if action == ActionEdit && !allowEdit {

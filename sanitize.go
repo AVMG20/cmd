@@ -6,9 +6,11 @@ import (
 )
 
 var (
-	fenceLine       = regexp.MustCompile("^\\s*```[a-zA-Z0-9_+-]*\\s*$")
-	leadingPrompt   = regexp.MustCompile(`^\s*(\$|>|#\s*\$)\s+`)
-	placeholderExpr = regexp.MustCompile(`<[a-zA-Z][a-zA-Z0-9 _.\-/]{0,40}>`)
+	fenceLine     = regexp.MustCompile("^\\s*```[a-zA-Z0-9_+-]*\\s*$")
+	leadingPrompt = regexp.MustCompile(`^\s*(\$|>|#\s*\$)\s+`)
+	// A placeholder may contain spaces ("<your file>") but never ends in one,
+	// which is what separates it from a redirect pair such as "<in.txt >out".
+	placeholderExpr = regexp.MustCompile(`<[a-zA-Z](?:[a-zA-Z0-9 _.\-/]{0,39}[a-zA-Z0-9_.\-/])?>`)
 )
 
 // Sanitize turns raw model output into something safe to hand to a shell.
@@ -19,6 +21,11 @@ var (
 func Sanitize(raw string) string {
 	s := strings.ReplaceAll(raw, "\r\n", "\n")
 	lines := strings.Split(s, "\n")
+
+	// When the model fenced its answer, the fence is the boundary: whatever it
+	// wrote around it is commentary, and a line of prose after the command
+	// would otherwise run as a second command.
+	lines = insideFence(lines)
 
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -52,6 +59,26 @@ func Sanitize(raw string) string {
 	}
 
 	return strings.TrimRight(strings.Join(kept, "\n"), " \t\n")
+}
+
+// insideFence returns the lines of the first fenced block, or all the lines
+// when there is no fence. An unterminated fence runs to the end.
+func insideFence(lines []string) []string {
+	open := -1
+	for i, line := range lines {
+		if !fenceLine.MatchString(line) {
+			continue
+		}
+		if open < 0 {
+			open = i
+			continue
+		}
+		return lines[open+1 : i]
+	}
+	if open >= 0 {
+		return lines[open+1:]
+	}
+	return lines
 }
 
 // IsRefusal reports whether the model answered with an explanation instead of a

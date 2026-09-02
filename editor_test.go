@@ -212,3 +212,28 @@ func TestEnterOnAnExactMatchFallsThrough(t *testing.T) {
 		t.Fatal("enter was swallowed; the line would never submit")
 	}
 }
+
+// A slash command takes no arguments, so Enter on its completion should both
+// fill it in and submit it, not leave the user to press Enter twice.
+func TestEnterOnASlashCompletionSubmits(t *testing.T) {
+	e := newTestEditor("/co", 3)
+	e.out = io.Discard
+	e.suggestions = []Completion{{Text: "/config"}}
+
+	if e.handleCompletionKey(Key{Name: KeyEnter}) {
+		t.Fatal("enter was swallowed; the command would need a second Enter")
+	}
+	if got := string(e.line); got != "/config" {
+		t.Errorf("line = %q, want %q", got, "/config")
+	}
+	if e.suggestions != nil {
+		t.Error("the list stayed open")
+	}
+}
+
+func TestDisplayLineShowsControlCharsAsSymbols(t *testing.T) {
+	got := displayLine([]rune("a\nb\tc"))
+	if got != "a⏎b→c" || len([]rune(got)) != 5 {
+		t.Errorf("displayLine = %q", got)
+	}
+}

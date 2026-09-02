@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
 	"time"
@@ -40,7 +42,8 @@ else cancels. Risky commands still need the word "yes" typed out.
 
 Run cmd with no request to open the harness: @ completes file paths from the
 current directory, / opens the command palette, up and down recall past
-requests, and e at the prompt edits the command before running it.
+requests, and e at the prompt edits the command before running it. -c, -f, -y
+and --debug carry into the harness; ctrl-c gives up on a slow request.
 
 Examples:
   cmd "show the 10 biggest files in this folder"
@@ -89,6 +92,10 @@ func run() int {
 	fs.Var(&fileArgs, "f", "")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stdout, usage)
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "%v\n\n%s", err, usage)
 		return 1
 	}
@@ -127,6 +134,12 @@ func run() int {
 		cfg.EnableThink = true
 	}
 
+	// ctrl-c while the model is working cancels the request instead of killing
+	// the process mid-spinner, so the terminal is left clean and the exit code
+	// says "aborted" rather than "signalled".
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignals()
+
 	// When stdout is redirected, behave like a well-mannered unix tool: emit
 	// the command and nothing else, and never execute anything.
 	if !isTerminal(os.Stdout) {
@@ -143,7 +156,12 @@ func run() int {
 			fmt.Fprint(os.Stderr, usage)
 			return 1
 		}
-		return Interactive(cfg, p)
+		return Interactive(ctx, cfg, p, harnessOptions{
+			copyMode: copyOnly,
+			yes:      yes,
+			debug:    debug,
+			files:    fileArgs,
+		})
 	}
 
 	// A redirect (`cmd "..." < users.csv`) carries a real path even though it
@@ -165,7 +183,11 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "%s\n", p.Dim(describeRequest(cfg, files)))
 	}
 
-	cmdText, err := generateCommand(os.Stderr, cfg, userMessage, quiet, p)
+	cmdText, err := generateCommand(ctx, os.Stderr, cfg, userMessage, quiet, p)
+	if errors.Is(err, errAborted) {
+		fmt.Fprintln(os.Stderr, p.Dim("Aborted."))
+		return abortExit
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", p.Red("Error:"), err)
 		return 1
@@ -323,10 +345,15 @@ func describeKey(cfg Config) string {
 	return "not set"
 }
 
-// generateCommand streams a response from Claude, showing a live single-line
-// preview on stderr, and returns the sanitized command.
-func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, p palette) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+// errAborted is returned by generateCommand when the request was cancelled by
+// the user rather than by a failure.
+var errAborted = errors.New("aborted")
+
+// generateCommand streams a response from the backend, showing a live
+// single-line preview on stderr, and returns the sanitized command. Cancelling
+// parent yields errAborted.
+func generateCommand(parent context.Context, out io.Writer, cfg Config, userMessage string, quiet bool, p palette) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
 
 	interactive := !quiet && isTerminal(os.Stderr)
@@ -345,6 +372,13 @@ func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, 
 	// switches to "Thinking" only once a reasoning block really starts.
 	spinner := NewSpinner(out, interactive)
 	spinner.Start("Loading")
+
+	// The preview rewrites one line in place, which only works if the line
+	// never wraps: a wrapped preview leaves its first row behind on erase.
+	previewWidth := 0
+	if interactive && streaming {
+		previewWidth = terminalWidth() - 3 // "> " and one column of slack
+	}
 
 	var (
 		answer       bytes.Buffer
@@ -385,7 +419,7 @@ func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, 
 			}
 			// Live preview: rewrite one line so the final, sanitized command
 			// can replace it cleanly without leaving duplicated output.
-			fmt.Fprintf(out, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(answer.String())))
+			fmt.Fprintf(out, "\r\033[K%s%s", p.Dim("> "), p.Dim(previewLine(answer.String(), previewWidth)))
 
 		case EventError:
 			streamErr = ev.Text
@@ -403,6 +437,9 @@ func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, 
 		fmt.Fprintln(out, p.reset())
 	}
 
+	if parent.Err() != nil {
+		return "", errAborted
+	}
 	if genErr != nil {
 		return "", genErr
 	}
@@ -412,16 +449,22 @@ func generateCommand(out io.Writer, cfg Config, userMessage string, quiet bool, 
 	return Sanitize(answer.String()), nil
 }
 
-// previewLine renders the tail of the streamed text on a single line.
-func previewLine(s string) string {
+// previewLine renders the tail of the streamed text on a single line no wider
+// than maxWidth columns; zero means the default of 90.
+func previewLine(s string, maxWidth int) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	if i := strings.LastIndex(s, "\n"); i >= 0 {
 		s = s[i+1:]
 	}
 	s = strings.TrimPrefix(strings.TrimSpace(s), "```")
-	const maxWidth = 90
-	if len(s) > maxWidth {
-		s = "…" + s[len(s)-maxWidth:]
+	if maxWidth <= 0 {
+		maxWidth = 90
+	}
+	if maxWidth < minInputWidth {
+		maxWidth = minInputWidth
+	}
+	if r := []rune(s); len(r) > maxWidth {
+		s = "…" + string(r[len(r)-maxWidth+1:])
 	}
 	return s
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,36 @@ func TestMatchRank(t *testing.T) {
 			t.Errorf("matchRank(%q, %q, %q) = %d, %v; want %d, %v",
 				tt.rel, tt.name, tt.needle, got, ok, tt.want, tt.match)
 		}
+	}
+}
+
+func TestCompleteFilesFindsHiddenEntriesByName(t *testing.T) {
+	// Hidden entries are skipped from a bare "@" but must be reachable when
+	// the prefix asks for them.
+	got := texts(CompleteFiles(completionTree(t), ".hid"))
+	if len(got) != 1 || got[0] != ".hidden/" {
+		t.Errorf("got %v, want [.hidden/]", got)
+	}
+}
+
+func TestCompleteFilesPrefersShallowEntriesUnderTheLimit(t *testing.T) {
+	// Breadth first: a top-level file that sorts after a large subtree must
+	// still be offered once the walk limit trims the tree.
+	dir := t.TempDir()
+	for i := 0; i < fileWalkLimit+10; i++ {
+		p := filepath.Join(dir, "a", "deep", "f"+strconv.Itoa(i)+".txt")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "zzz.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := texts(CompleteFiles(dir, "zzz"))
+	if len(got) != 1 || got[0] != "zzz.txt" {
+		t.Errorf("got %v, want [zzz.txt]", got)
 	}
 }

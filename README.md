@@ -116,7 +116,11 @@ Run `cmd` with no request.
 | `up` / `down` | Move through completions; with none open, previous requests, kept in `~/.cmd-history`. |
 | `e` at the prompt | Edit the generated command before running it. |
 | `ctrl-w` / `ctrl-u` | Delete the last word / the line. |
+| `ctrl-c` | While the model is working, give up on that request. At the prompt, leave. |
 | `ctrl-d` | Leave. |
+
+`-c`, `-f`, `-y` and `--debug` carry into the harness: `cmd -c` opens it with
+copy mode on, `cmd -f data.json` sends that file with every request.
 
 | Command | |
 |---|---|
